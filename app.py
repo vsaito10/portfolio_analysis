@@ -1,8 +1,10 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 import numpy as np
+import scipy.stats
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import date, timedelta  # noqa: F401
 
 from portfolio import (
@@ -222,55 +224,78 @@ with tab_analysis:
     # Cumulative returns
     # -----------------------------------------------------------------------
     st.subheader("📈 Cumulative Returns")
-    fig_cum, ax_cum = plt.subplots(figsize=(12, 5))
+    benchmark_cum = cumulative_returns(benchmark_returns)
+    fig_cum = go.Figure()
     for name, cr in cum_ret_all.items():
-        ax_cum.plot(cr.index, cr * 100, label=name)
-    ax_cum.set_title(f"Cumulative Returns ({start_str} → {end_str})")
-    ax_cum.set_xlabel("Date")
-    ax_cum.set_ylabel("Cumulative Return (%)")
-    ax_cum.legend()
-    ax_cum.grid(True, alpha=0.3)
-    plt.tight_layout()
-    st.pyplot(fig_cum)
-    plt.close(fig_cum)
+        fig_cum.add_trace(go.Scatter(x=cr.index, y=(cr * 100).round(2), mode="lines", name=name))
+    fig_cum.add_trace(go.Scatter(
+        x=benchmark_cum.index, y=(benchmark_cum * 100).round(2),
+        mode="lines", name=benchmark,
+        line=dict(color="gray", dash="dash"),
+    ))
+    fig_cum.add_hline(y=0, line=dict(color="red", dash="dash", width=1))
+    fig_cum.update_layout(
+        title=f"Cumulative Returns ({start_str} → {end_str})",
+        xaxis_title="Date",
+        yaxis_title="Cumulative Return (%)",
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig_cum, use_container_width=True)
+
+    # -----------------------------------------------------------------------
+    # Rolling annualised volatility
+    # -----------------------------------------------------------------------
+    fig_vol = go.Figure()
+    for name, daily_ret in daily_ret_all.items():
+        roll_vol = daily_ret.rolling(roll_window).std() * np.sqrt(252) * 100
+        fig_vol.add_trace(go.Scatter(x=roll_vol.index, y=roll_vol.round(2), mode="lines", name=name))
+    bm_roll_vol = benchmark_returns.rolling(roll_window).std() * np.sqrt(252) * 100
+    fig_vol.add_trace(go.Scatter(
+        x=bm_roll_vol.index, y=bm_roll_vol.round(2),
+        mode="lines", name=benchmark,
+        line=dict(color="gray", dash="dash"),
+    ))
+    fig_vol.update_layout(
+        title=f"Rolling Annualised Volatility ({roll_window}-day window)",
+        xaxis_title="Date",
+        yaxis_title="Annualised Volatility (%)",
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig_vol, use_container_width=True)
 
     # -----------------------------------------------------------------------
     # Underwater chart
     # -----------------------------------------------------------------------
     st.subheader("🌊 Underwater Chart (Drawdown from Peak)")
-    fig_uw, axes_uw = plt.subplots(n, 1, figsize=(14, 4 * n))
-    if n == 1:
-        axes_uw = [axes_uw]
-
-    for ax, (name, daily_ret) in zip(axes_uw, daily_ret_all.items()):
+    fig_uw = make_subplots(rows=n, cols=1, shared_xaxes=False,
+                           subplot_titles=[f"{nm} — Underwater Chart" for nm in daily_ret_all])
+    for i, (name, daily_ret) in enumerate(daily_ret_all.items(), start=1):
         cum      = (1 + daily_ret).cumprod()
         peak     = cum.cummax()
         drawdown = (cum - peak) / peak * 100
 
-        ax.fill_between(drawdown.index, drawdown, 0, color="crimson", alpha=0.55)
-        ax.plot(drawdown.index, drawdown, color="darkred", linewidth=0.8)
-        ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
-
         max_dd      = drawdown.min()
         max_dd_date = drawdown.idxmin()
-        ax.annotate(
-            f"Max DD: {max_dd:.1f}%",
-            xy=(max_dd_date, max_dd),
-            xytext=(10, -15),
-            textcoords="offset points",
-            fontsize=9,
-            color="darkred",
-            arrowprops=dict(arrowstyle="->", color="darkred", lw=0.8),
-        )
-        ax.set_title(f"{name} — Underwater Chart (Drawdown from Peak)", fontsize=12, fontweight="bold")
-        ax.set_ylabel("Drawdown (%)")
-        ax.set_xlabel("Date")
-        ax.grid(True, alpha=0.3)
-        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0f}%"))
 
-    plt.tight_layout()
-    st.pyplot(fig_uw)
-    plt.close(fig_uw)
+        fig_uw.add_trace(go.Scatter(
+            x=drawdown.index, y=drawdown.round(2),
+            fill="tozeroy", fillcolor="rgba(220,20,60,0.35)",
+            line=dict(color="darkred", width=0.8),
+            name=name, showlegend=False,
+        ), row=i, col=1)
+        fig_uw.add_hline(y=0, line=dict(color="black", dash="dash", width=0.8), row=i, col=1)
+        fig_uw.add_annotation(
+            x=max_dd_date, y=max_dd,
+            text=f"Max DD: {max_dd:.1f}%",
+            showarrow=True, arrowhead=2, arrowcolor="darkred",
+            font=dict(color="darkred", size=9),
+            row=i, col=1,
+        )
+        fig_uw.update_yaxes(title_text="Drawdown (%)", ticksuffix="%", row=i, col=1)
+        fig_uw.update_xaxes(title_text="Date", row=i, col=1)
+
+    fig_uw.update_layout(height=400 * n)
+    st.plotly_chart(fig_uw, use_container_width=True)
 
     # -----------------------------------------------------------------------
     # Monthly returns heatmap
@@ -278,15 +303,9 @@ with tab_analysis:
     st.subheader("🗓️ Monthly Returns Heatmap")
     month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    col_labels = month_labels + ["Ann."]
-    norm = mcolors.TwoSlopeNorm(vmin=-10, vcenter=0, vmax=10)
-    cmap = plt.get_cmap("RdYlGn")
+    col_labels = month_labels + ["Ann.", "Cum."]
 
-    fig_m, axes_m = plt.subplots(n, 1, figsize=(14, 4 * n))
-    if n == 1:
-        axes_m = [axes_m]
-
-    for ax, (name, daily_ret) in zip(axes_m, daily_ret_all.items()):
+    def build_heatmap_pivot(daily_ret):
         monthly     = (1 + daily_ret).resample("ME").prod() - 1
         monthly_pct = monthly * 100
         pivot = monthly_pct.groupby([monthly_pct.index.year, monthly_pct.index.month]).first()
@@ -297,25 +316,63 @@ with tab_analysis:
             lambda x: (1 + x / 100).prod() - 1
         ) * 100
         pivot["Ann."] = annual
+        monthly_sorted = monthly_pct.sort_index()
+        cum_factors = (1 + monthly_sorted / 100).cumprod()
+        cum_by_year = cum_factors.groupby(cum_factors.index.year).last()
+        pivot["Cum."] = (cum_by_year - 1) * 100
+        return pivot
 
-        im = ax.imshow(pivot.values, cmap=cmap, norm=norm, aspect="auto")
-        ax.set_xticks(range(13))
-        ax.set_xticklabels(col_labels)
-        ax.set_yticks(range(len(pivot.index)))
-        ax.set_yticklabels(pivot.index)
-        ax.set_title(f"{name} — Monthly Returns (%)", fontsize=13, fontweight="bold")
-        for row in range(pivot.shape[0]):
-            for col in range(pivot.shape[1]):
-                val = pivot.values[row, col]
-                if not np.isnan(val):
-                    color = "white" if abs(val) > 6 else "black"
-                    ax.text(col, row, f"{val:.1f}%", ha="center", va="center",
-                            fontsize=9, color=color)
-        plt.colorbar(im, ax=ax, label="Return (%)", fraction=0.02, pad=0.02)
+    def draw_heatmap_plotly(name, daily_ret):
+        pivot = build_heatmap_pivot(daily_ret)
+        z     = pivot.values
+        text  = np.where(np.isnan(z), "", np.vectorize(lambda v: f"{v:.1f}%")(z))
+        fig = go.Figure(go.Heatmap(
+            z=z,
+            x=col_labels,
+            y=[str(yr) for yr in pivot.index],
+            colorscale="RdYlGn",
+            zmid=0,
+            zmin=-10,
+            zmax=10,
+            text=text,
+            texttemplate="%{text}",
+            textfont=dict(size=11),
+            colorbar=dict(title="Return (%)"),
+            hovertemplate="Year: %{y}<br>Period: %{x}<br>Return: %{z:.2f}%<extra></extra>",
+        ))
+        fig.update_layout(
+            title=dict(text=f"{name} — Monthly Returns (%)", font=dict(size=14)),
+            xaxis=dict(side="bottom"),
+            yaxis=dict(autorange="reversed"),
+            height=max(250, 60 * len(pivot.index) + 100),
+            margin=dict(l=60, r=60, t=60, b=40),
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-    plt.tight_layout()
-    st.pyplot(fig_m)
-    plt.close(fig_m)
+    heatmap_items = list(daily_ret_all.items()) + [(benchmark, benchmark_returns)]
+    for name, daily_ret in heatmap_items:
+        draw_heatmap_plotly(name, daily_ret)
+
+    # -----------------------------------------------------------------------
+    # Consistency table
+    # -----------------------------------------------------------------------
+    st.subheader("📅 Consistency")
+    bm_monthly_pct = ((1 + benchmark_returns).resample("ME").prod() - 1) * 100
+    consistency_rows = {}
+    for name, daily_ret in daily_ret_all.items():
+        monthly = (1 + daily_ret).resample("ME").prod() - 1
+        monthly_pct = monthly * 100
+        aligned = monthly_pct.align(bm_monthly_pct, join="inner")
+        port_aligned, bm_aligned = aligned
+        consistency_rows[name] = {
+            "Positive Months":            int((monthly_pct > 0).sum()),
+            "Negative Months":            int((monthly_pct < 0).sum()),
+            "Best Month (%)":             round(monthly_pct.max(), 2),
+            "Worst Month (%)":            round(monthly_pct.min(), 2),
+            f"Months above {benchmark}":   int((port_aligned > bm_aligned).sum()),
+            f"Months below {benchmark}":   int((port_aligned < bm_aligned).sum()),
+        }
+    st.dataframe(pd.DataFrame(consistency_rows).T, use_container_width=True)
 
     # -----------------------------------------------------------------------
     # Top-performing stock per month
@@ -360,11 +417,9 @@ with tab_analysis:
     # -----------------------------------------------------------------------
     st.subheader("🎲 Monte Carlo Simulation")
     rng = np.random.default_rng(42)
-    fig_mc, axes_mc = plt.subplots(n, 1, figsize=(14, 5 * n))
-    if n == 1:
-        axes_mc = [axes_mc]
-
-    for ax, (name, daily_ret) in zip(axes_mc, daily_ret_all.items()):
+    fig_mc = make_subplots(rows=n, cols=1,
+                           subplot_titles=[f"{nm} — Monte Carlo" for nm in daily_ret_all])
+    for i, (name, daily_ret) in enumerate(daily_ret_all.items(), start=1):
         r       = daily_ret.dropna().values
         sampled = rng.choice(r, size=(mc_sims, mc_days), replace=True)
         paths   = np.cumprod(1 + sampled, axis=1) - 1
@@ -377,31 +432,183 @@ with tab_analysis:
         p95  = np.percentile(paths, 95, axis=0) * 100
         days = np.arange(1, mc_days + 1)
 
-        for i in range(mc_sims):
-            ax.plot(days, paths[i] * 100, color="steelblue", alpha=0.04, linewidth=0.5)
+        # Batch all simulation paths into one trace with None separators
+        xs, ys = [], []
+        for path in paths:
+            xs.extend(days.tolist() + [None])
+            ys.extend((path * 100).tolist() + [None])
+        fig_mc.add_trace(go.Scatter(
+            x=xs, y=ys, mode="lines",
+            line=dict(color="steelblue", width=0.5),
+            opacity=0.08, name="Simulations", showlegend=(i == 1),
+        ), row=i, col=1)
 
-        ax.fill_between(days, p5,  p95, alpha=0.15, color="steelblue", label="5–95th pct")
-        ax.fill_between(days, p25, p75, alpha=0.30, color="steelblue", label="25–75th pct")
-        ax.plot(days, p50, color="navy", linewidth=2, label="Median")
-        ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
+        # Confidence bands (5-95, 25-75)
+        fig_mc.add_trace(go.Scatter(x=days, y=p95, mode="lines", line=dict(width=0), showlegend=False), row=i, col=1)
+        fig_mc.add_trace(go.Scatter(x=days, y=p5, fill="tonexty",
+            fillcolor="rgba(70,130,180,0.15)", line=dict(width=0),
+            name="5–95th pct", showlegend=(i == 1)), row=i, col=1)
+        fig_mc.add_trace(go.Scatter(x=days, y=p75, mode="lines", line=dict(width=0), showlegend=False), row=i, col=1)
+        fig_mc.add_trace(go.Scatter(x=days, y=p25, fill="tonexty",
+            fillcolor="rgba(70,130,180,0.30)", line=dict(width=0),
+            name="25–75th pct", showlegend=(i == 1)), row=i, col=1)
+
+        # Median line
+        fig_mc.add_trace(go.Scatter(x=days, y=p50, mode="lines",
+            line=dict(color="navy", width=2), name="Median", showlegend=(i == 1)), row=i, col=1)
+
+        # Zero reference line
+        fig_mc.add_hline(y=0, line=dict(color="black", dash="dash", width=0.8), row=i, col=1)
+
+        # Annotations for final percentile values
+        for pct_val, lbl in [(p5[-1], "5th"), (p50[-1], "50th"), (p95[-1], "95th")]:
+            fig_mc.add_annotation(
+                x=mc_days, y=pct_val,
+                text=f"{pct_val:.1f}%", showarrow=False,
+                xanchor="left", font=dict(color="navy", size=9),
+                row=i, col=1,
+            )
+
+        fig_mc.update_yaxes(title_text="Cumulative Return (%)", row=i, col=1)
+        fig_mc.update_xaxes(title_text="Trading Days", row=i, col=1)
+
+    fig_mc.update_layout(height=500 * n)
+    st.plotly_chart(fig_mc, use_container_width=True)
+
+    # -----------------------------------------------------------------------
+    # Monte Carlo — Student-t
+    # -----------------------------------------------------------------------
+    st.subheader("🎲 Monte Carlo Simulation (Student-t)")
+    rng_t = np.random.default_rng(42)
+    fig_mct = make_subplots(rows=n, cols=1,
+                            subplot_titles=[f"{nm} — Monte Carlo (Student-t)" for nm in daily_ret_all])
+    for i, (name, daily_ret) in enumerate(daily_ret_all.items(), start=1):
+        r = daily_ret.dropna().values
+        mu, sigma = r.mean(), r.std(ddof=1)
+        df_t, loc_t, scale_t = scipy.stats.t.fit(r)
+
+        sampled = scipy.stats.t.rvs(df=df_t, loc=loc_t, scale=scale_t,
+                                     size=(mc_sims, mc_days), random_state=rng_t)
+        paths = np.cumprod(1 + sampled, axis=1) - 1
+
+        p5  = np.percentile(paths,  5, axis=0) * 100
+        p25 = np.percentile(paths, 25, axis=0) * 100
+        p50 = np.percentile(paths, 50, axis=0) * 100
+        p75 = np.percentile(paths, 75, axis=0) * 100
+        p95 = np.percentile(paths, 95, axis=0) * 100
+        days = np.arange(1, mc_days + 1)
+
+        xs, ys = [], []
+        for path in paths:
+            xs.extend(days.tolist() + [None])
+            ys.extend((path * 100).tolist() + [None])
+        fig_mct.add_trace(go.Scatter(
+            x=xs, y=ys, mode="lines",
+            line=dict(color="darkorange", width=0.5),
+            opacity=0.08, name="Simulations", showlegend=(i == 1),
+        ), row=i, col=1)
+
+        fig_mct.add_trace(go.Scatter(x=days, y=p95, mode="lines", line=dict(width=0), showlegend=False), row=i, col=1)
+        fig_mct.add_trace(go.Scatter(x=days, y=p5, fill="tonexty",
+            fillcolor="rgba(255,140,0,0.15)", line=dict(width=0),
+            name="5–95th pct", showlegend=(i == 1)), row=i, col=1)
+        fig_mct.add_trace(go.Scatter(x=days, y=p75, mode="lines", line=dict(width=0), showlegend=False), row=i, col=1)
+        fig_mct.add_trace(go.Scatter(x=days, y=p25, fill="tonexty",
+            fillcolor="rgba(255,140,0,0.30)", line=dict(width=0),
+            name="25–75th pct", showlegend=(i == 1)), row=i, col=1)
+
+        fig_mct.add_trace(go.Scatter(x=days, y=p50, mode="lines",
+            line=dict(color="saddlebrown", width=2), name="Median", showlegend=(i == 1)), row=i, col=1)
+
+        fig_mct.add_hline(y=0, line=dict(color="black", dash="dash", width=0.8), row=i, col=1)
 
         for pct_val, lbl in [(p5[-1], "5th"), (p50[-1], "50th"), (p95[-1], "95th")]:
-            ax.annotate(f"{pct_val:.1f}%", xy=(mc_days, pct_val),
-                        xytext=(6, 0), textcoords="offset points",
-                        va="center", fontsize=8, color="navy")
+            fig_mct.add_annotation(
+                x=mc_days, y=pct_val,
+                text=f"{pct_val:.1f}%", showarrow=False,
+                xanchor="left", font=dict(color="saddlebrown", size=9),
+                row=i, col=1,
+            )
 
-        ax.set_title(
-            f"{name} — Monte Carlo ({mc_sims} paths, {mc_days} days)  |  "
-            f"5th: {np.percentile(final_values,5):.1f}%  "
-            f"Median: {np.median(final_values):.1f}%  "
-            f"95th: {np.percentile(final_values,95):.1f}%",
-            fontsize=11, fontweight="bold",
+        fig_mct.add_annotation(
+            x=0.01, y=0.98, xref="paper", yref="paper",
+            text=f"Fitted ν = {df_t:.1f}", showarrow=False,
+            font=dict(size=10, color="saddlebrown"),
+            xanchor="left", yanchor="top",
+            row=i, col=1,
         )
-        ax.set_xlabel("Trading Days")
-        ax.set_ylabel("Cumulative Return (%)")
-        ax.legend(loc="upper left", fontsize=9)
-        ax.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    st.pyplot(fig_mc)
-    plt.close(fig_mc)
+        fig_mct.update_yaxes(title_text="Cumulative Return (%)", row=i, col=1)
+        fig_mct.update_xaxes(title_text="Trading Days", row=i, col=1)
+
+    fig_mct.update_layout(height=500 * n)
+    st.plotly_chart(fig_mct, use_container_width=True)
+
+    # -----------------------------------------------------------------------
+    # Monte Carlo — Cauchy
+    # -----------------------------------------------------------------------
+    st.subheader("🎲 Monte Carlo Simulation (Cauchy)")
+    rng_c = np.random.default_rng(42)
+    fig_mcc = make_subplots(rows=n, cols=1,
+                            subplot_titles=[f"{nm} — Monte Carlo (Cauchy)" for nm in daily_ret_all])
+    for i, (name, daily_ret) in enumerate(daily_ret_all.items(), start=1):
+        r = daily_ret.dropna().values
+        loc_c, scale_c = scipy.stats.cauchy.fit(r)
+
+        sampled = scipy.stats.cauchy.rvs(loc=loc_c, scale=scale_c,
+                                          size=(mc_sims, mc_days), random_state=rng_c)
+        sampled = np.clip(sampled, -0.5, 0.5)
+        paths = np.cumprod(1 + sampled, axis=1) - 1
+
+        p5  = np.percentile(paths,  5, axis=0) * 100
+        p25 = np.percentile(paths, 25, axis=0) * 100
+        p50 = np.percentile(paths, 50, axis=0) * 100
+        p75 = np.percentile(paths, 75, axis=0) * 100
+        p95 = np.percentile(paths, 95, axis=0) * 100
+        days = np.arange(1, mc_days + 1)
+
+        xs, ys = [], []
+        for path in paths:
+            xs.extend(days.tolist() + [None])
+            ys.extend((path * 100).tolist() + [None])
+        fig_mcc.add_trace(go.Scatter(
+            x=xs, y=ys, mode="lines",
+            line=dict(color="purple", width=0.5),
+            opacity=0.08, name="Simulations", showlegend=(i == 1),
+        ), row=i, col=1)
+
+        fig_mcc.add_trace(go.Scatter(x=days, y=p95, mode="lines", line=dict(width=0), showlegend=False), row=i, col=1)
+        fig_mcc.add_trace(go.Scatter(x=days, y=p5, fill="tonexty",
+            fillcolor="rgba(128,0,128,0.15)", line=dict(width=0),
+            name="5–95th pct", showlegend=(i == 1)), row=i, col=1)
+        fig_mcc.add_trace(go.Scatter(x=days, y=p75, mode="lines", line=dict(width=0), showlegend=False), row=i, col=1)
+        fig_mcc.add_trace(go.Scatter(x=days, y=p25, fill="tonexty",
+            fillcolor="rgba(128,0,128,0.30)", line=dict(width=0),
+            name="25–75th pct", showlegend=(i == 1)), row=i, col=1)
+
+        fig_mcc.add_trace(go.Scatter(x=days, y=p50, mode="lines",
+            line=dict(color="indigo", width=2), name="Median", showlegend=(i == 1)), row=i, col=1)
+
+        fig_mcc.add_hline(y=0, line=dict(color="black", dash="dash", width=0.8), row=i, col=1)
+
+        for pct_val in [p5[-1], p50[-1], p95[-1]]:
+            fig_mcc.add_annotation(
+                x=mc_days, y=pct_val,
+                text=f"{pct_val:.1f}%", showarrow=False,
+                xanchor="left", font=dict(color="indigo", size=9),
+                row=i, col=1,
+            )
+
+        fig_mcc.add_annotation(
+            x=0.01, y=0.98, xref="paper", yref="paper",
+            text=f"Fitted loc={loc_c:.4f}, scale={scale_c:.4f}", showarrow=False,
+            font=dict(size=10, color="indigo"),
+            xanchor="left", yanchor="top",
+            row=i, col=1,
+        )
+
+        fig_mcc.update_yaxes(title_text="Cumulative Return (%)", row=i, col=1)
+        fig_mcc.update_xaxes(title_text="Trading Days", row=i, col=1)
+
+    fig_mcc.update_layout(height=500 * n)
+    st.plotly_chart(fig_mcc, use_container_width=True)
