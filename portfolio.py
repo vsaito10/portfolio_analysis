@@ -6,6 +6,12 @@ import numpy as np
 from datetime import datetime
 
 
+def get_ohlc_data(ticker: str, start: str, end: str) -> pd.DataFrame:
+    """Download OHLC data for a single ticker."""
+    data = yf.download(ticker, start=start, end=end, auto_adjust=True)
+    return data[["Open", "High", "Low", "Close", "Volume"]].dropna()
+
+
 def get_close_prices(tickers: list[str], start: str, end: str) -> pd.DataFrame:
     """Download adjusted close prices for a list of tickers."""
     data = yf.download(tickers, start=start, end=end, auto_adjust=True)["Close"]
@@ -22,6 +28,52 @@ def build_portfolio_returns(prices: pd.DataFrame, weights: dict[str, float]) -> 
     daily_returns = prices[tickers].pct_change().dropna()
     portfolio_returns = (daily_returns * w).sum(axis=1)
     return portfolio_returns
+
+
+def build_portfolio_returns_dynamic(
+    prices: pd.DataFrame,
+    slices: list[dict],
+    fallback_start: str,
+    fallback_end: str,
+) -> pd.Series:
+    """
+    Build daily portfolio returns for a time-sliced allocation.
+
+    slices : list of {"start": str|None, "end": str|None, "weights": {ticker: float}}
+             start/end None → fallback_start / fallback_end
+    Slices are processed in order; overlapping days keep the first occurrence.
+    """
+    if not slices:
+        return pd.Series(dtype=float)
+
+    all_dates = prices.index
+    parts: list[pd.Series] = []
+
+    for sl in slices:
+        s = sl.get("start") or fallback_start
+        e = sl.get("end")   or fallback_end
+        w = {t: v for t, v in sl.get("weights", {}).items() if t in prices.columns}
+        if not w:
+            continue
+
+        # Include one trading day of context before the slice start so
+        # pct_change() produces a return on the first day of the slice.
+        start_pos = all_dates.searchsorted(pd.Timestamp(s))
+        ctx_pos   = max(0, start_pos - 1)
+        end_pos   = all_dates.searchsorted(pd.Timestamp(e), side="right")
+        slice_prices = prices.iloc[ctx_pos:end_pos][list(w.keys())]
+        if slice_prices.empty:
+            continue
+
+        ret = build_portfolio_returns(slice_prices, w)
+        ret = ret.loc[pd.Timestamp(s): pd.Timestamp(e)]
+        parts.append(ret)
+
+    if not parts:
+        return pd.Series(dtype=float)
+
+    combined = pd.concat(parts)
+    return combined[~combined.index.duplicated(keep="first")].sort_index()
 
 
 def cumulative_returns(returns: pd.Series) -> pd.Series:
@@ -117,6 +169,47 @@ def portfolio_alpha(
     rp = annualised_return(returns)
     rm = annualised_return(benchmark_returns)
     return rp - (risk_free_rate + beta * (rm - risk_free_rate))
+
+
+def hill_estimator(returns: pd.Series, k_max: int | None = None) -> pd.DataFrame:
+    """
+    Compute the Hill estimator for the tail index across a range of k values.
+
+    The Hill estimator ξ̂(k) = (1/k) Σ_{i=1}^{k} log(X_(i) / X_(k+1))
+    where X_(1) ≥ X_(2) ≥ ... ≥ X_(n) are the ordered losses (positive values).
+
+    A larger ξ (closer to 1) signals a heavier tail and higher extreme-event risk.
+    Rule of thumb:  ξ < 0.25 → thin tail
+                    0.25 ≤ ξ < 0.5 → moderate tail
+                    ξ ≥ 0.5 → heavy tail (variance may be infinite)
+
+    Parameters
+    ----------
+    returns : daily return series
+    k_max   : maximum number of upper-order statistics to consider
+               (defaults to min(200, n//4))
+
+    Returns
+    -------
+    DataFrame with columns ['k', 'xi'] where xi = Hill tail-index estimate
+    """
+    losses = -returns.dropna()
+    losses = losses[losses > 0].sort_values(ascending=False).values
+    n = len(losses)
+
+    if k_max is None:
+        k_max = min(200, n // 4)
+    k_max = max(k_max, 10)
+
+    ks, xis = [], []
+    for k in range(1, k_max + 1):
+        if k >= n:
+            break
+        xi = np.mean(np.log(losses[:k]) - np.log(losses[k]))
+        ks.append(k)
+        xis.append(xi)
+
+    return pd.DataFrame({"k": ks, "xi": xis})
 
 
 def compare_portfolios(
