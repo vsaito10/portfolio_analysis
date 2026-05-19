@@ -8,7 +8,6 @@ from plotly.subplots import make_subplots
 from datetime import date, timedelta  # noqa: F401
 
 from portfolio import (
-    get_ohlc_data,
     get_close_prices,
     build_portfolio_returns,
     cumulative_returns,
@@ -100,7 +99,7 @@ def draw_heatmap_plotly(name, daily_ret):
         height=max(250, 60 * len(pivot.index) + 100),
         margin=dict(l=60, r=60, t=60, b=40),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 # ---------------------------------------------------------------------------
 # Portfolio helpers
@@ -128,7 +127,7 @@ def _portfolio_weights(purchases: list[dict]) -> dict[str, float]:
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_builder, tab_analysis, tab_stocks = st.tabs(["Portfolio Builder", "Analysis", "Stock Analysis"])
+tab_builder, tab_analysis = st.tabs(["Portfolio Builder", "Analysis"])
 
 # ===========================================================================
 # TAB 1 — Portfolio Builder
@@ -140,7 +139,7 @@ with tab_builder:
     col_add, col_del = st.columns(2)
     with col_add:
         new_name = st.text_input("New portfolio name", placeholder="e.g. Balanced")
-        if st.button("Add portfolio", use_container_width=True) and new_name:
+        if st.button("Add portfolio", width='stretch') and new_name:
             if new_name not in st.session_state.portfolios:
                 st.session_state.portfolios[new_name] = []
                 st.rerun()
@@ -148,7 +147,7 @@ with tab_builder:
                 st.warning("Name already exists.")
     with col_del:
         del_name = st.selectbox("Remove portfolio", ["—"] + list(st.session_state.portfolios))
-        if st.button("Remove portfolio", use_container_width=True) and del_name != "—":
+        if st.button("Remove portfolio", width='stretch') and del_name != "—":
             st.session_state.portfolios.pop(del_name, None)
             st.rerun()
 
@@ -188,7 +187,7 @@ with tab_builder:
                 with r2c3:
                     st.metric("Total invested", f"${new_shares * new_price:,.2f}")
 
-                if st.button("Add Purchase", key=f"add_{port_name}", use_container_width=True) \
+                if st.button("Add Purchase", key=f"add_{port_name}", width='stretch') \
                         and new_ticker:
                     purchases.append({
                         "type":   "buy",
@@ -228,7 +227,7 @@ with tab_builder:
                 with s2c3:
                     st.metric("Total received", f"${sell_shares * sell_price:,.2f}")
 
-                if st.button("Add Sale", key=f"addsell_{port_name}", use_container_width=True) \
+                if st.button("Add Sale", key=f"addsell_{port_name}", width='stretch') \
                         and sell_ticker:
                     purchases.append({
                         "type":   "sell",
@@ -246,7 +245,14 @@ with tab_builder:
                 if not purchases:
                     st.info("No transactions yet — add one above.")
                 else:
-                    st.markdown("#### Allocation (net open positions)")
+                    head_l, head_r = st.columns([4, 1])
+                    with head_l:
+                        st.markdown("#### Allocation (net open positions)")
+                    with head_r:
+                        if st.button("🗑️ Reset portfolio", key=f"reset_{port_name}",
+                                     width='stretch', help="Remove all transactions from this portfolio"):
+                            st.session_state.portfolios[port_name] = []
+                            st.rerun()
                     _buy_s: dict[str, float] = {}
                     _buy_c: dict[str, float] = {}
                     _sell_s: dict[str, float] = {}
@@ -319,7 +325,7 @@ with tab_builder:
                                   .style
                                   .map(_color_return, subset=["Return (%)"])
                                   .format(_fmt, na_rep="N/A"),
-                                use_container_width=True,
+                                width='stretch',
                                 hide_index=True,
                             )
                             st.caption(f"Portfolio total: **${total_portfolio:,.2f}**")
@@ -346,47 +352,138 @@ with tab_builder:
                     st.markdown("#### Portfolio Value Evolution")
 
                     sorted_txns = sorted(purchases, key=lambda p: p["date"])
-                    evo_dates, evo_values, evo_colors, evo_labels = [], [], [], []
-                    running_total = 0.0
-                    for p in sorted_txns:
-                        is_buy = p.get("type", "buy") == "buy"
-                        running_total += p["total"] if is_buy else -p["total"]
-                        evo_dates.append(p["date"])
-                        evo_values.append(round(running_total, 2))
-                        evo_colors.append("#2e7d32" if is_buy else "#c62828")
-                        evo_labels.append(
-                            f"{'Buy' if is_buy else 'Sell'} {p['shares']:g} {p['ticker']}"
-                            f" @ ${p['price']:.2f}"
-                        )
+                    evo_tickers = sorted({p["ticker"] for p in sorted_txns})
+                    first_date  = pd.Timestamp(sorted_txns[0]["date"])
+                    today_ts    = pd.Timestamp(date.today())
 
-                    fig_evo = go.Figure()
-                    fig_evo.add_trace(go.Scatter(
-                        x=evo_dates,
-                        y=evo_values,
-                        mode="lines+markers",
-                        line=dict(shape="hv", color="steelblue", width=2),
-                        fill="tozeroy",
-                        fillcolor="rgba(70,130,180,0.12)",
-                        marker=dict(size=10, color=evo_colors,
-                                    line=dict(color="white", width=1.5)),
-                        customdata=evo_labels,
-                        hovertemplate=(
-                            "<b>%{customdata}</b><br>"
-                            "Date: %{x}<br>"
-                            "Net Invested: $%{y:,.2f}<extra></extra>"
-                        ),
-                    ))
-                    fig_evo.add_hline(y=0, line=dict(color="black", dash="dash", width=0.8))
-                    fig_evo.update_layout(
-                        xaxis_title="Date",
-                        yaxis_title="Net Invested ($)",
-                        yaxis_tickprefix="$",
-                        yaxis_tickformat=",.0f",
-                        hovermode="x unified",
-                        height=350,
-                        margin=dict(t=20),
-                    )
-                    st.plotly_chart(fig_evo, use_container_width=True)
+                    evo_prices = None
+                    try:
+                        with st.spinner("Computing portfolio value history…"):
+                            evo_prices = get_close_prices(
+                                evo_tickers,
+                                first_date.strftime("%Y-%m-%d"),
+                                (today_ts + timedelta(days=1)).strftime("%Y-%m-%d"),
+                            )
+                    except Exception as e:
+                        st.warning(f"Could not fetch price history: {e}")
+
+                    if evo_prices is not None and not evo_prices.empty:
+                        if isinstance(evo_prices.columns, pd.MultiIndex):
+                            evo_prices.columns = evo_prices.columns.get_level_values(0)
+                        evo_prices = evo_prices.ffill()
+
+                        # Build cumulative shares-held & cost-basis time series
+                        shares_held = pd.DataFrame(0.0, index=evo_prices.index, columns=evo_tickers)
+                        cost_basis  = pd.Series(0.0, index=evo_prices.index)
+                        for p in sorted_txns:
+                            sign    = 1.0 if p.get("type", "buy") == "buy" else -1.0
+                            tx_date = pd.Timestamp(p["date"])
+                            mask    = shares_held.index >= tx_date
+                            if p["ticker"] in shares_held.columns:
+                                shares_held.loc[mask, p["ticker"]] += sign * p["shares"]
+                            cost_basis.loc[mask] += sign * p["total"]
+
+                        # Market value = Σ (shares × close price)
+                        market_value = (shares_held * evo_prices[evo_tickers]).sum(axis=1)
+
+                        fig_evo = go.Figure()
+                        fig_evo.add_trace(go.Scatter(
+                            x=market_value.index, y=market_value.round(2),
+                            mode="lines", name="Market Value",
+                            line=dict(color="steelblue", width=2),
+                            fill="tozeroy", fillcolor="rgba(70,130,180,0.18)",
+                            hovertemplate="%{x|%Y-%m-%d}<br>Value: $%{y:,.2f}<extra></extra>",
+                        ))
+                        fig_evo.add_trace(go.Scatter(
+                            x=cost_basis.index, y=cost_basis.round(2),
+                            mode="lines", name="Net Invested (cost basis)",
+                            line=dict(color="darkorange", width=1.5, dash="dash"),
+                            hovertemplate="%{x|%Y-%m-%d}<br>Cost: $%{y:,.2f}<extra></extra>",
+                        ))
+
+                        # Buy/Sell markers on the market-value line
+                        marker_x, marker_y, marker_colors, marker_labels = [], [], [], []
+                        for p in sorted_txns:
+                            tx_date = pd.Timestamp(p["date"])
+                            pos     = min(market_value.index.searchsorted(tx_date),
+                                          len(market_value.index) - 1)
+                            marker_x.append(market_value.index[pos])
+                            marker_y.append(market_value.iloc[pos])
+                            is_buy  = p.get("type", "buy") == "buy"
+                            marker_colors.append("#2e7d32" if is_buy else "#c62828")
+                            marker_labels.append(
+                                f"{'Buy' if is_buy else 'Sell'} {p['shares']:g} {p['ticker']}"
+                                f" @ ${p['price']:.2f}"
+                            )
+                        fig_evo.add_trace(go.Scatter(
+                            x=marker_x, y=marker_y,
+                            mode="markers", name="Transactions",
+                            marker=dict(size=10, color=marker_colors,
+                                        line=dict(color="white", width=1.5)),
+                            customdata=marker_labels,
+                            hovertemplate="<b>%{customdata}</b><br>%{x|%Y-%m-%d}<extra></extra>",
+                        ))
+
+                        fig_evo.add_hline(y=0, line=dict(color="gray", dash="dash", width=0.8))
+                        fig_evo.update_layout(
+                            xaxis_title="Date",
+                            yaxis_title="Portfolio Value ($)",
+                            yaxis_tickprefix="$",
+                            yaxis_tickformat=",.0f",
+                            hovermode="x unified",
+                            height=400,
+                            margin=dict(t=20),
+                            legend=dict(orientation="h", yanchor="bottom",
+                                        y=1.02, xanchor="right", x=1),
+                        )
+                        st.plotly_chart(fig_evo, width='stretch')
+
+                        # ── % variation of portfolio vs. cost basis ──────────
+                        st.markdown("#### Portfolio Return (%) — Market Value vs. Cost Basis")
+                        pct_return = pd.Series(np.nan, index=market_value.index)
+                        valid = cost_basis > 0
+                        pct_return.loc[valid] = (
+                            (market_value.loc[valid] - cost_basis.loc[valid])
+                            / cost_basis.loc[valid] * 100
+                        )
+                        pct_return = pct_return.dropna()
+
+                        if not pct_return.empty:
+                            last_pct = pct_return.iloc[-1]
+                            line_clr = "#2e7d32" if last_pct >= 0 else "#c62828"
+                            fill_clr = ("rgba(46,125,50,0.18)" if last_pct >= 0
+                                        else "rgba(198,40,40,0.18)")
+
+                            fig_pct = go.Figure()
+                            fig_pct.add_trace(go.Scatter(
+                                x=pct_return.index, y=pct_return.round(2),
+                                mode="lines", name="Return (%)",
+                                line=dict(color=line_clr, width=2),
+                                fill="tozeroy", fillcolor=fill_clr,
+                                hovertemplate="%{x|%Y-%m-%d}<br>Return: %{y:+.2f}%<extra></extra>",
+                            ))
+                            fig_pct.add_hline(y=0, line=dict(color="gray",
+                                                              dash="dash", width=0.8))
+                            fig_pct.update_layout(
+                                xaxis_title="Date",
+                                yaxis_title="Return (%)",
+                                yaxis_ticksuffix="%",
+                                hovermode="x unified",
+                                height=300,
+                                margin=dict(t=20),
+                            )
+                            st.plotly_chart(fig_pct, width='stretch')
+
+                            pmin = pct_return.min()
+                            pmax = pct_return.max()
+                            pc1, pc2, pc3 = st.columns(3)
+                            pc1.metric("Current Return", f"{last_pct:+.2f}%")
+                            pc2.metric("Peak Return",    f"{pmax:+.2f}%",
+                                       delta=f"on {pct_return.idxmax().strftime('%Y-%m-%d')}")
+                            pc3.metric("Lowest Return",  f"{pmin:+.2f}%",
+                                       delta=f"on {pct_return.idxmin().strftime('%Y-%m-%d')}")
+                    else:
+                        st.info("No price data available to build the evolution chart.")
 
                     # Summary metrics + realized P&L
                     total_bought = sum(p["total"] for p in purchases if p.get("type","buy")=="buy")
@@ -468,7 +565,7 @@ with tab_builder:
                                 "Shares":           "{:,.4g}",
                                 "Balance (shares)": "{:,.4g}",
                             }),
-                        use_container_width=True,
+                        width='stretch',
                     )
 
                     # Remove a specific transaction
@@ -489,319 +586,16 @@ with tab_builder:
                     with rc2:
                         st.write("")
                         st.write("")
-                        if st.button("Remove", key=f"rem_{port_name}", use_container_width=True) \
+                        if st.button("Remove", key=f"rem_{port_name}", width='stretch') \
                                 and to_remove != "—":
                             orig_idx = sorted_idx[remove_opts.index(to_remove)]
                             purchases.pop(orig_idx)
                             st.rerun()
 
     st.divider()
-    if st.button("▶ Run Analysis", type="primary", use_container_width=True):
+    if st.button("▶ Run Analysis", type="primary", width='stretch'):
         st.session_state["run_analysis"] = True
         st.rerun()
-
-# ===========================================================================
-# TAB 3 — Stock Analysis  (rendered before TAB 2 so st.stop() in TAB 2
-#          does not prevent this tab from being built)
-# ===========================================================================
-with tab_stocks:
-    st.header("Stock Analysis")
-
-    all_port_tickers = sorted({
-        p["ticker"] for purchases in st.session_state.portfolios.values() for p in purchases
-    })
-    if not all_port_tickers:
-        st.info("Add tickers to your portfolios in **Portfolio Builder** first.")
-    else:
-        selected_ticker = st.selectbox("Select stock", all_port_tickers)
-
-        start_str_sa = start_date.strftime("%Y-%m-%d")
-        end_str_sa   = end_date.strftime("%Y-%m-%d")
-
-        with st.spinner(f"Downloading {selected_ticker} data…"):
-            try:
-                ohlc = get_ohlc_data(selected_ticker, start_str_sa, end_str_sa)
-            except Exception as e:
-                st.error(f"Failed to download data for {selected_ticker}: {e}")
-                ohlc = None
-
-        if ohlc is not None and ohlc.empty:
-            st.warning(f"No data found for {selected_ticker} in the selected date range.")
-            ohlc = None
-
-        if ohlc is not None:
-            # Flatten MultiIndex columns if present (yfinance sometimes returns them)
-            if isinstance(ohlc.columns, pd.MultiIndex):
-                ohlc.columns = ohlc.columns.get_level_values(0)
-
-            # --- Metrics Table ---
-            st.subheader("📊 Metrics")
-            _daily_ret_sa = ohlc["Close"].pct_change().dropna()
-            _cum_sa       = (1 + _daily_ret_sa).cumprod() - 1
-
-            try:
-                _bm_prices  = get_close_prices([benchmark], start_str_sa, end_str_sa)
-                _bm_ret_sa  = _bm_prices[benchmark].pct_change().dropna()
-            except Exception:
-                _bm_ret_sa = None
-
-            _beta  = portfolio_beta(_daily_ret_sa, _bm_ret_sa)  if _bm_ret_sa is not None else None
-            _alpha = portfolio_alpha(_daily_ret_sa, _bm_ret_sa, _beta, rfr) if _bm_ret_sa is not None else None
-            _corr  = portfolio_correlation(_daily_ret_sa, _bm_ret_sa) if _bm_ret_sa is not None else None
-            _rec   = drawdown_recovery_days(_daily_ret_sa)
-
-            metrics_sa = {
-                "Metric": [
-                    "Annual Return (%)",
-                    "Cumulative Return (%)",
-                    f"CAGR {selected_ticker} (%)",
-                    f"CAGR {benchmark} (%)",
-                    "Annual Volatility (%)",
-                    "Max Drawdown (%)",
-                    "Max DD Recovery (days)",
-                    f"Beta (vs. {benchmark})",
-                    f"Alpha (%) (vs. {benchmark})",
-                    f"Correlation (vs. {benchmark})",
-                ],
-                "Value": [
-                    round(annualised_return(_daily_ret_sa) * 100, 2),
-                    round(_cum_sa.iloc[-1] * 100, 2),
-                    round(annualised_return(_daily_ret_sa) * 100, 2),
-                    round(annualised_return(_bm_ret_sa) * 100, 2) if _bm_ret_sa is not None else "N/A",
-                    round(annualised_volatility(_daily_ret_sa) * 100, 2),
-                    round(max_drawdown(_daily_ret_sa) * 100, 2),
-                    _rec if _rec is not None else "Not recovered",
-                    round(_beta, 4)  if _beta  is not None else "N/A",
-                    round(_alpha * 100, 2) if _alpha is not None else "N/A",
-                    round(_corr, 4)  if _corr  is not None else "N/A",
-                ],
-            }
-            st.dataframe(pd.DataFrame(metrics_sa).set_index("Metric"), use_container_width=True)
-
-            # --- Candlestick + Volume ---
-            # --- RSI (14-period) ---
-            rsi_period = 14
-            delta  = ohlc["Close"].diff()
-            gain   = delta.clip(lower=0).rolling(rsi_period).mean()
-            loss   = (-delta.clip(upper=0)).rolling(rsi_period).mean()
-            rs     = gain / loss
-            rsi    = 100 - (100 / (1 + rs))
-
-            fig_candle = make_subplots(
-                rows=3, cols=1,
-                shared_xaxes=True,
-                row_heights=[0.60, 0.20, 0.20],
-                vertical_spacing=0.03,
-                subplot_titles=("", "Volume", f"RSI ({rsi_period})"),
-            )
-
-            fig_candle.add_trace(go.Candlestick(
-                x=ohlc.index,
-                open=ohlc["Open"],
-                high=ohlc["High"],
-                low=ohlc["Low"],
-                close=ohlc["Close"],
-                name=selected_ticker,
-                increasing_line_color="limegreen",
-                decreasing_line_color="crimson",
-            ), row=1, col=1)
-
-            # --- Bollinger Bands (20-day SMA, ±2σ and ±3σ) ---
-            bb_window = 20
-            sma = ohlc["Close"].rolling(bb_window).mean()
-            std = ohlc["Close"].rolling(bb_window).std()
-            ub2 = sma + 2 * std
-            lb2 = sma - 2 * std
-            ub3 = sma + 3 * std
-            lb3 = sma - 3 * std
-
-            # 3σ band (outer, lighter fill)
-            fig_candle.add_trace(go.Scatter(
-                x=ohlc.index, y=ub3, mode="lines",
-                line=dict(color="rgba(255,165,0,0.4)", width=1, dash="dot"),
-                name="BB +3σ", legendgroup="bb3", showlegend=True,
-            ), row=1, col=1)
-            fig_candle.add_trace(go.Scatter(
-                x=ohlc.index, y=lb3, mode="lines",
-                line=dict(color="rgba(255,165,0,0.4)", width=1, dash="dot"),
-                fill="tonexty", fillcolor="rgba(255,165,0,0.06)",
-                name="BB −3σ", legendgroup="bb3", showlegend=True,
-            ), row=1, col=1)
-
-            # 2σ band (inner, stronger fill)
-            fig_candle.add_trace(go.Scatter(
-                x=ohlc.index, y=ub2, mode="lines",
-                line=dict(color="rgba(30,144,255,0.7)", width=1.2),
-                name="BB +2σ", legendgroup="bb2", showlegend=True,
-            ), row=1, col=1)
-            fig_candle.add_trace(go.Scatter(
-                x=ohlc.index, y=lb2, mode="lines",
-                line=dict(color="rgba(30,144,255,0.7)", width=1.2),
-                fill="tonexty", fillcolor="rgba(30,144,255,0.10)",
-                name="BB −2σ", legendgroup="bb2", showlegend=True,
-            ), row=1, col=1)
-
-            # Middle band (SMA)
-            fig_candle.add_trace(go.Scatter(
-                x=ohlc.index, y=sma, mode="lines",
-                line=dict(color="rgba(30,144,255,1)", width=1.5, dash="dash"),
-                name=f"SMA {bb_window}",
-            ), row=1, col=1)
-
-            colors = ["limegreen" if c >= o else "crimson"
-                      for c, o in zip(ohlc["Close"], ohlc["Open"])]
-            fig_candle.add_trace(go.Bar(
-                x=ohlc.index,
-                y=ohlc["Volume"],
-                name="Volume",
-                marker_color=colors,
-                showlegend=False,
-            ), row=2, col=1)
-
-            fig_candle.add_trace(go.Scatter(
-                x=rsi.index, y=rsi.round(2),
-                mode="lines",
-                line=dict(color="darkorange", width=1.5),
-                name=f"RSI {rsi_period}",
-                hovertemplate="%{x|%Y-%m-%d}<br>RSI: %{y:.1f}<extra></extra>",
-            ), row=3, col=1)
-            fig_candle.add_hline(y=70, line=dict(color="red",   width=1, dash="dash"), row=3, col=1)
-            fig_candle.add_hline(y=30, line=dict(color="green", width=1, dash="dash"), row=3, col=1)
-            fig_candle.add_hrect(y0=70, y1=100, fillcolor="red",   opacity=0.05, line_width=0, row=3, col=1)
-            fig_candle.add_hrect(y0=0,  y1=30,  fillcolor="green", opacity=0.05, line_width=0, row=3, col=1)
-            fig_candle.update_yaxes(range=[0, 100], title_text=f"RSI ({rsi_period})", row=3, col=1)
-
-            fig_candle.update_layout(
-                title=f"{selected_ticker} — Candlestick ({start_str_sa} → {end_str_sa})",
-                xaxis_rangeslider_visible=False,
-                yaxis_title="Price (USD)",
-                yaxis2_title="Volume",
-                hovermode="x unified",
-                height=750,
-            )
-            st.plotly_chart(fig_candle, use_container_width=True)
-
-            # --- Cumulative Return ---
-            st.subheader("📈 Cumulative Return")
-            cum_ret_sa = (1 + ohlc["Close"].pct_change()).cumprod() - 1
-
-            bm_cum_sa = (1 + _bm_ret_sa).cumprod() - 1 if _bm_ret_sa is not None else None
-
-            fig_cum_sa = go.Figure()
-            fig_cum_sa.add_trace(go.Scatter(
-                x=cum_ret_sa.index, y=(cum_ret_sa * 100).round(2),
-                mode="lines", name=selected_ticker,
-            ))
-            if bm_cum_sa is not None:
-                fig_cum_sa.add_trace(go.Scatter(
-                    x=bm_cum_sa.index, y=(bm_cum_sa * 100).round(2),
-                    mode="lines", name=benchmark,
-                ))
-            fig_cum_sa.add_hline(y=0, line=dict(color="red", dash="dash", width=1))
-            fig_cum_sa.update_layout(
-                title=f"Cumulative Return ({start_str_sa} → {end_str_sa})",
-                xaxis_title="Date",
-                yaxis_title="Cumulative Return (%)",
-                hovermode="x unified",
-            )
-            st.plotly_chart(fig_cum_sa, use_container_width=True)
-
-            # --- Momentum ---
-            st.subheader("Momentum (10-day)")
-            mom_period = 10
-            momentum   = ohlc["Close"].diff(mom_period)
-
-            mom_colors = ["limegreen" if v >= 0 else "crimson" for v in momentum]
-            fig_mom = go.Figure()
-            fig_mom.add_trace(go.Bar(
-                x=momentum.index, y=momentum.round(4),
-                marker_color=mom_colors,
-                name="Momentum",
-                hovertemplate="%{x|%Y-%m-%d}<br>Momentum: %{y:.4f}<extra></extra>",
-            ))
-            fig_mom.add_hline(y=0, line=dict(color="black", width=1, dash="dash"))
-            fig_mom.update_layout(
-                xaxis_title="Date",
-                yaxis_title=f"Close(t) − Close(t−{mom_period})",
-                hovermode="x unified",
-                height=300,
-                margin=dict(t=20),
-            )
-            st.plotly_chart(fig_mom, use_container_width=True)
-
-            # --- Rolling Volatility ---
-            st.subheader("Rolling Annualised Volatility (21-day)")
-            daily_ret_sa = _daily_ret_sa
-            roll_vol_sa  = daily_ret_sa.rolling(21).std() * np.sqrt(252) * 100
-
-            fig_vol_sa = go.Figure()
-            fig_vol_sa.add_trace(go.Scatter(
-                x=roll_vol_sa.index, y=roll_vol_sa.round(2),
-                mode="lines", fill="tozeroy",
-                fillcolor="rgba(30,144,255,0.12)",
-                line=dict(color="steelblue", width=1.5),
-                name="Rolling Vol",
-                hovertemplate="%{x|%Y-%m-%d}<br>Vol: %{y:.2f}%<extra></extra>",
-            ))
-            fig_vol_sa.update_layout(
-                xaxis_title="Date",
-                yaxis_title="Annualised Volatility (%)",
-                hovermode="x unified",
-                height=300,
-                margin=dict(t=20),
-            )
-            st.plotly_chart(fig_vol_sa, use_container_width=True)
-
-            # --- Underwater Chart ---
-            st.subheader("🌊 Underwater Chart (Drawdown from Peak)")
-            cum_uw   = (1 + daily_ret_sa).cumprod()
-            peak_uw  = cum_uw.cummax()
-            dd_uw    = (cum_uw - peak_uw) / peak_uw * 100
-            max_dd_val  = dd_uw.min()
-            max_dd_date = dd_uw.idxmin()
-
-            fig_uw_sa = go.Figure()
-            fig_uw_sa.add_trace(go.Scatter(
-                x=dd_uw.index, y=dd_uw.round(2),
-                fill="tozeroy", fillcolor="rgba(220,20,60,0.35)",
-                line=dict(color="darkred", width=0.8),
-                name=selected_ticker, showlegend=False,
-                hovertemplate="%{x|%Y-%m-%d}<br>Drawdown: %{y:.2f}%<extra></extra>",
-            ))
-            fig_uw_sa.add_hline(y=0, line=dict(color="black", dash="dash", width=0.8))
-            fig_uw_sa.add_annotation(
-                x=max_dd_date, y=max_dd_val,
-                text=f"Max DD: {max_dd_val:.1f}%",
-                showarrow=True, arrowhead=2, arrowcolor="darkred",
-                font=dict(color="darkred", size=9),
-            )
-            fig_uw_sa.update_layout(
-                title=f"{selected_ticker} — Underwater Chart ({start_str_sa} → {end_str_sa})",
-                xaxis_title="Date",
-                yaxis_title="Drawdown (%)",
-                yaxis_ticksuffix="%",
-                hovermode="x unified",
-                height=350,
-                margin=dict(t=40),
-            )
-            st.plotly_chart(fig_uw_sa, use_container_width=True)
-
-            # --- Monthly Returns Heatmap ---
-            st.subheader("Monthly Returns Heatmap")
-            draw_heatmap_plotly(selected_ticker, daily_ret_sa)
-
-            # --- Summary stats ---
-            st.subheader("Summary")
-            first_close = ohlc["Close"].iloc[0]
-            last_close  = ohlc["Close"].iloc[-1]
-            period_ret  = (last_close / first_close - 1) * 100
-
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Last Close",   f"${last_close:.2f}")
-            c2.metric("Period Return", f"{period_ret:+.2f}%")
-            c3.metric("52w High",     f"${ohlc['High'].max():.2f}")
-            c4.metric("52w Low",      f"${ohlc['Low'].min():.2f}")
-            c5.metric("Avg Volume",   f"{int(ohlc['Volume'].mean()):,}")
 
 # ===========================================================================
 # TAB 2 — Analysis
@@ -880,7 +674,7 @@ with tab_analysis:
     # Metrics table
     # -----------------------------------------------------------------------
     st.subheader("📊 Metrics")
-    st.dataframe(metrics_df, use_container_width=True)
+    st.dataframe(metrics_df, width='stretch')
 
     # -----------------------------------------------------------------------
     # Cumulative returns
@@ -902,7 +696,7 @@ with tab_analysis:
         yaxis_title="Cumulative Return (%)",
         hovermode="x unified",
     )
-    st.plotly_chart(fig_cum, use_container_width=True)
+    st.plotly_chart(fig_cum, width='stretch')
 
     # -----------------------------------------------------------------------
     # Rolling annualised volatility
@@ -923,7 +717,7 @@ with tab_analysis:
         yaxis_title="Annualised Volatility (%)",
         hovermode="x unified",
     )
-    st.plotly_chart(fig_vol, use_container_width=True)
+    st.plotly_chart(fig_vol, width='stretch')
 
     # -----------------------------------------------------------------------
     # Underwater chart
@@ -957,7 +751,7 @@ with tab_analysis:
         fig_uw.update_xaxes(title_text="Date", row=i, col=1)
 
     fig_uw.update_layout(height=400 * n)
-    st.plotly_chart(fig_uw, use_container_width=True)
+    st.plotly_chart(fig_uw, width='stretch')
 
     # -----------------------------------------------------------------------
     # Monthly returns heatmap
@@ -986,7 +780,7 @@ with tab_analysis:
             f"Months above {benchmark}":   int((port_aligned > bm_aligned).sum()),
             f"Months below {benchmark}":   int((port_aligned < bm_aligned).sum()),
         }
-    st.dataframe(pd.DataFrame(consistency_rows).T, use_container_width=True)
+    st.dataframe(pd.DataFrame(consistency_rows).T, width='stretch')
 
     # -----------------------------------------------------------------------
     # Top-performing stock per month
@@ -1023,7 +817,7 @@ with tab_analysis:
             top_df.style
                 .map(color_return, subset=["Return (%)", "Worst Return (%)"])
                 .format({"Return (%)": "{:+.2f}%", "Worst Return (%)": "{:+.2f}%"}),
-            use_container_width=True,
+            width='stretch',
         )
 
     # -----------------------------------------------------------------------
@@ -1059,7 +853,7 @@ with tab_analysis:
             height=max(300, 55 * len(tickers) + 100),
             margin=dict(l=60, r=60, t=60, b=60),
         )
-        st.plotly_chart(fig_corr, use_container_width=True)
+        st.plotly_chart(fig_corr, width='stretch')
 
     # -----------------------------------------------------------------------
     # Monte Carlo
@@ -1122,7 +916,7 @@ with tab_analysis:
         fig_mc.update_xaxes(title_text="Trading Days", row=i, col=1)
 
     fig_mc.update_layout(height=500 * n)
-    st.plotly_chart(fig_mc, use_container_width=True)
+    st.plotly_chart(fig_mc, width='stretch')
 
     # -----------------------------------------------------------------------
     # Monte Carlo — Student-t
@@ -1191,7 +985,7 @@ with tab_analysis:
         fig_mct.update_xaxes(title_text="Trading Days", row=i, col=1)
 
     fig_mct.update_layout(height=500 * n)
-    st.plotly_chart(fig_mct, use_container_width=True)
+    st.plotly_chart(fig_mct, width='stretch')
 
     # -----------------------------------------------------------------------
     # Monte Carlo — Cauchy
@@ -1260,7 +1054,7 @@ with tab_analysis:
         fig_mcc.update_xaxes(title_text="Trading Days", row=i, col=1)
 
     fig_mcc.update_layout(height=500 * n)
-    st.plotly_chart(fig_mcc, use_container_width=True)
+    st.plotly_chart(fig_mcc, width='stretch')
 
     # -----------------------------------------------------------------------
     # Hill Estimator — Extreme Value Analysis
@@ -1327,7 +1121,7 @@ with tab_analysis:
         hovermode="x unified",
         height=420,
     )
-    st.plotly_chart(fig_hill, use_container_width=True)
+    st.plotly_chart(fig_hill, width='stretch')
 
     summary_df = pd.DataFrame(hill_summary).T
 
@@ -1340,6 +1134,6 @@ with tab_analysis:
 
     st.dataframe(
         summary_df.style.map(_color_risk, subset=["Risk Assessment"]),
-        use_container_width=True,
+        width='stretch',
     )
 
