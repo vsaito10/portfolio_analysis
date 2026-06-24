@@ -643,11 +643,19 @@ with tab_analysis:
         rec   = drawdown_recovery_days(ret)
 
         bm_cagr = annualised_return(benchmark_returns)
+
+        # Volatility drag: arithmetic ann. return − geometric ann. return (CAGR).
+        # Exact form, not the σ²/2 approximation — works for fat-tailed series too.
+        arith_ann_return = ret.mean() * 252
+        geom_ann_return  = annualised_return(ret)
+        vol_drag         = arith_ann_return - geom_ann_return
+
         metrics[name] = {
             "Ann. Return (%)":                round(annualised_return(ret) * 100, 2),
             "CAGR (%)":                       round(annualised_return(ret) * 100, 2),
             f"CAGR {benchmark} (%)":          round(bm_cagr * 100, 2),
             "Ann. Volatility (%)":            round(annualised_volatility(ret) * 100, 2),
+            "Volatility Drag (%)":            round(vol_drag * 100, 2),
             "Sharpe Ratio":                   round(sharpe_ratio(ret, rfr), 4),
             "Sortino Ratio":                  round(sortino_ratio(ret, rfr), 4),
             "Calmar Ratio":                   round(calmar_ratio(ret), 4),
