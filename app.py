@@ -124,6 +124,31 @@ def _portfolio_weights(purchases: list[dict]) -> dict[str, float]:
     s = sum(net.values())
     return {t: v / s for t, v in net.items()} if s > 0 else {}
 
+
+def _net_shares(purchases: list[dict]) -> dict[str, float]:
+    """Net open shares per ticker (buys − sells)."""
+    net: dict[str, float] = {}
+    for p in purchases:
+        sign = 1.0 if p.get("type", "buy") == "buy" else -1.0
+        net[p["ticker"]] = net.get(p["ticker"], 0.0) + sign * p["shares"]
+    return {t: s for t, s in net.items() if s > 1e-9}
+
+
+def _close_price_on(ticker: str, date_str: str) -> float | None:
+    """Close price of `ticker` on the first trading day on/after `date_str`."""
+    end = (pd.Timestamp(date_str) + timedelta(days=10)).strftime("%Y-%m-%d")
+    try:
+        px = get_close_prices([ticker], date_str, end)
+    except Exception:
+        return None
+    if isinstance(px.columns, pd.MultiIndex):
+        px.columns = px.columns.get_level_values(0)
+    if ticker in px.columns:
+        s = px[ticker].dropna()
+        if not s.empty:
+            return float(s.iloc[0])
+    return None
+
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
@@ -161,83 +186,190 @@ with tab_builder:
             with ptab:
                 purchases = st.session_state.portfolios[port_name]
 
-                # ── Add purchase form ────────────────────────────────────────
-                st.markdown("#### Add Purchase")
-                r1c1, r1c2 = st.columns([2, 2])
-                with r1c1:
-                    new_ticker = st.text_input(
-                        "Ticker", key=f"tick_{port_name}", placeholder="e.g. AAPL",
-                    ).upper().strip()
-                with r1c2:
-                    new_date = st.date_input(
-                        "Purchase date", key=f"date_{port_name}", value=date.today(),
-                    )
-
-                r2c1, r2c2, r2c3 = st.columns([2, 2, 2])
-                with r2c1:
-                    new_shares = st.number_input(
-                        "Number of shares", key=f"shares_{port_name}",
-                        min_value=0.0001, value=1.0, step=1.0, format="%.4g",
-                    )
-                with r2c2:
-                    new_price = st.number_input(
-                        "Price per share", key=f"price_{port_name}",
-                        min_value=0.0001, value=100.0, step=0.01, format="%.2f",
-                    )
-                with r2c3:
-                    st.metric("Total invested", f"${new_shares * new_price:,.2f}")
-
-                if st.button("Add Purchase", key=f"add_{port_name}", width='stretch') \
-                        and new_ticker:
-                    purchases.append({
-                        "type":   "buy",
-                        "ticker": new_ticker,
-                        "date":   new_date.strftime("%Y-%m-%d"),
-                        "shares": new_shares,
-                        "price":  new_price,
-                        "total":  round(new_shares * new_price, 2),
-                    })
-                    st.rerun()
-
+                # ── Input mode selector ──────────────────────────────────────
+                mode = st.radio(
+                    "Input mode",
+                    ["Detailed", "Simple"],
+                    horizontal=True,
+                    key=f"mode_{port_name}",
+                    help=(
+                        "Detailed: enter shares, price and date for each buy/sell. "
+                        "Simple: enter just a ticker and a date — the app fetches the "
+                        "close price on that date and invests a fixed amount per position."
+                    ),
+                )
                 st.divider()
 
-                # ── Add sale form ────────────────────────────────────────────
-                st.markdown("#### Add Sale")
-                s1c1, s1c2 = st.columns([2, 2])
-                with s1c1:
-                    sell_ticker = st.text_input(
-                        "Ticker", key=f"sell_tick_{port_name}", placeholder="e.g. AAPL",
-                    ).upper().strip()
-                with s1c2:
-                    sell_date = st.date_input(
-                        "Sale date", key=f"sell_date_{port_name}", value=date.today(),
+                if mode == "Detailed":
+                    # ── Add purchase form ────────────────────────────────────
+                    st.markdown("#### Add Purchase")
+                    r1c1, r1c2 = st.columns([2, 2])
+                    with r1c1:
+                        new_ticker = st.text_input(
+                            "Ticker", key=f"tick_{port_name}", placeholder="e.g. AAPL",
+                        ).upper().strip()
+                    with r1c2:
+                        new_date = st.date_input(
+                            "Purchase date", key=f"date_{port_name}", value=date.today(),
+                        )
+
+                    r2c1, r2c2, r2c3 = st.columns([2, 2, 2])
+                    with r2c1:
+                        new_shares = st.number_input(
+                            "Number of shares", key=f"shares_{port_name}",
+                            min_value=0.0001, value=1.0, step=1.0, format="%.4g",
+                        )
+                    with r2c2:
+                        new_price = st.number_input(
+                            "Price per share", key=f"price_{port_name}",
+                            min_value=0.0001, value=100.0, step=0.01, format="%.2f",
+                        )
+                    with r2c3:
+                        st.metric("Total invested", f"${new_shares * new_price:,.2f}")
+
+                    if st.button("Add Purchase", key=f"add_{port_name}", width='stretch') \
+                            and new_ticker:
+                        purchases.append({
+                            "type":   "buy",
+                            "ticker": new_ticker,
+                            "date":   new_date.strftime("%Y-%m-%d"),
+                            "shares": new_shares,
+                            "price":  new_price,
+                            "total":  round(new_shares * new_price, 2),
+                        })
+                        st.rerun()
+
+                    st.divider()
+
+                    # ── Add sale form ────────────────────────────────────────
+                    st.markdown("#### Add Sale")
+                    s1c1, s1c2 = st.columns([2, 2])
+                    with s1c1:
+                        sell_ticker = st.text_input(
+                            "Ticker", key=f"sell_tick_{port_name}", placeholder="e.g. AAPL",
+                        ).upper().strip()
+                    with s1c2:
+                        sell_date = st.date_input(
+                            "Sale date", key=f"sell_date_{port_name}", value=date.today(),
+                        )
+
+                    s2c1, s2c2, s2c3 = st.columns([2, 2, 2])
+                    with s2c1:
+                        sell_shares = st.number_input(
+                            "Number of shares", key=f"sell_shares_{port_name}",
+                            min_value=0.0001, value=1.0, step=1.0, format="%.4g",
+                        )
+                    with s2c2:
+                        sell_price = st.number_input(
+                            "Sale price per share", key=f"sell_price_{port_name}",
+                            min_value=0.0001, value=100.0, step=0.01, format="%.2f",
+                        )
+                    with s2c3:
+                        st.metric("Total received", f"${sell_shares * sell_price:,.2f}")
+
+                    if st.button("Add Sale", key=f"addsell_{port_name}", width='stretch') \
+                            and sell_ticker:
+                        purchases.append({
+                            "type":   "sell",
+                            "ticker": sell_ticker,
+                            "date":   sell_date.strftime("%Y-%m-%d"),
+                            "shares": sell_shares,
+                            "price":  sell_price,
+                            "total":  round(sell_shares * sell_price, 2),
+                        })
+                        st.rerun()
+
+                else:
+                    # ── Simple mode: ticker + date only ──────────────────────
+                    st.markdown("#### Add Position (simple)")
+                    st.caption(
+                        "Enter a ticker and a date. The app fetches the close price "
+                        "on that date and buys the configured amount per position."
+                    )
+                    invest_amt = st.number_input(
+                        "Investment per position ($)", key=f"simp_amt_{port_name}",
+                        min_value=0.01, value=5000.0, step=100.0, format="%.2f",
                     )
 
-                s2c1, s2c2, s2c3 = st.columns([2, 2, 2])
-                with s2c1:
-                    sell_shares = st.number_input(
-                        "Number of shares", key=f"sell_shares_{port_name}",
-                        min_value=0.0001, value=1.0, step=1.0, format="%.4g",
-                    )
-                with s2c2:
-                    sell_price = st.number_input(
-                        "Sale price per share", key=f"sell_price_{port_name}",
-                        min_value=0.0001, value=100.0, step=0.01, format="%.2f",
-                    )
-                with s2c3:
-                    st.metric("Total received", f"${sell_shares * sell_price:,.2f}")
+                    sp1, sp2 = st.columns([2, 2])
+                    with sp1:
+                        simp_ticker = st.text_input(
+                            "Ticker", key=f"simp_tick_{port_name}", placeholder="e.g. AAPL",
+                        ).upper().strip()
+                    with sp2:
+                        simp_date = st.date_input(
+                            "Start date", key=f"simp_date_{port_name}", value=date.today(),
+                        )
 
-                if st.button("Add Sale", key=f"addsell_{port_name}", width='stretch') \
-                        and sell_ticker:
-                    purchases.append({
-                        "type":   "sell",
-                        "ticker": sell_ticker,
-                        "date":   sell_date.strftime("%Y-%m-%d"),
-                        "shares": sell_shares,
-                        "price":  sell_price,
-                        "total":  round(sell_shares * sell_price, 2),
-                    })
-                    st.rerun()
+                    if st.button("Add Position", key=f"simp_add_{port_name}", width='stretch') \
+                            and simp_ticker:
+                        with st.spinner(f"Fetching {simp_ticker} price…"):
+                            px = _close_price_on(simp_ticker, simp_date.strftime("%Y-%m-%d"))
+                        if px is None or px <= 0:
+                            st.error(
+                                f"Could not fetch a price for {simp_ticker} on/after "
+                                f"{simp_date:%Y-%m-%d}. Check the ticker and date."
+                            )
+                        else:
+                            shares = invest_amt / px
+                            purchases.append({
+                                "type":   "buy",
+                                "ticker": simp_ticker,
+                                "date":   simp_date.strftime("%Y-%m-%d"),
+                                "shares": shares,
+                                "price":  round(px, 4),
+                                "total":  round(shares * px, 2),
+                            })
+                            st.success(
+                                f"Bought ${invest_amt:,.2f} of {simp_ticker} "
+                                f"({shares:.4g} shares @ ${px:,.2f})."
+                            )
+                            st.rerun()
+
+                    st.divider()
+
+                    # ── Simple sale: sell full position by ticker + date ─────
+                    st.markdown("#### Close Position (simple)")
+                    st.caption(
+                        "Select an open position and a date. The app sells all its "
+                        "shares at the close price on that date."
+                    )
+                    open_positions = _net_shares(purchases)
+                    ss1, ss2 = st.columns([2, 2])
+                    with ss1:
+                        simp_sell_ticker = st.selectbox(
+                            "Position to close", ["—"] + list(open_positions.keys()),
+                            key=f"simp_sell_tick_{port_name}",
+                        )
+                    with ss2:
+                        simp_sell_date = st.date_input(
+                            "Sale date", key=f"simp_sell_date_{port_name}", value=date.today(),
+                        )
+
+                    if st.button("Close Position", key=f"simp_sell_{port_name}", width='stretch') \
+                            and simp_sell_ticker != "—":
+                        with st.spinner(f"Fetching {simp_sell_ticker} price…"):
+                            px = _close_price_on(simp_sell_ticker, simp_sell_date.strftime("%Y-%m-%d"))
+                        if px is None or px <= 0:
+                            st.error(
+                                f"Could not fetch a price for {simp_sell_ticker} on/after "
+                                f"{simp_sell_date:%Y-%m-%d}. Check the date."
+                            )
+                        else:
+                            shares = open_positions[simp_sell_ticker]
+                            purchases.append({
+                                "type":   "sell",
+                                "ticker": simp_sell_ticker,
+                                "date":   simp_sell_date.strftime("%Y-%m-%d"),
+                                "shares": shares,
+                                "price":  round(px, 4),
+                                "total":  round(shares * px, 2),
+                            })
+                            st.success(
+                                f"Sold {shares:.4g} shares of {simp_sell_ticker} "
+                                f"@ ${px:,.2f} (${shares * px:,.2f})."
+                            )
+                            st.rerun()
 
                 st.divider()
 

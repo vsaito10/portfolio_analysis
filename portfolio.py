@@ -25,7 +25,7 @@ def build_portfolio_returns(prices: pd.DataFrame, weights: dict[str, float]) -> 
     tickers = list(weights.keys())
     w = pd.Series(weights)
     w = w / w.sum()  # normalise to 1
-    daily_returns = prices[tickers].pct_change().dropna()
+    daily_returns = prices[tickers].pct_change(fill_method=None).dropna()
     portfolio_returns = (daily_returns * w).sum(axis=1)
     return portfolio_returns
 
