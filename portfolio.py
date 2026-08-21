@@ -1,9 +1,10 @@
-import yfinance as yf
-import pandas as pd
-import matplotlib.pyplot as plt
+from datetime import datetime, timezone
+
 import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
 import numpy as np
-from datetime import datetime
+import pandas as pd
+import yfinance as yf
 
 
 def get_ohlc_data(ticker: str, start: str, end: str) -> pd.DataFrame:
@@ -278,7 +279,7 @@ def plot_monthly_returns(portfolio_returns: dict[str, pd.Series]):
     col_labels = month_labels + ["Ann."]
 
     n = len(portfolio_returns)
-    fig, axes = plt.subplots(n, 1, figsize=(14, 4 * n))
+    _fig, axes = plt.subplots(n, 1, figsize=(14, 4 * n))
     if n == 1:
         axes = [axes]
 
@@ -328,7 +329,7 @@ def plot_monte_carlo(
 ):
     """Monte Carlo simulation: project each portfolio forward using bootstrapped daily returns."""
     n = len(portfolio_returns)
-    fig, axes = plt.subplots(n, 1, figsize=(14, 5 * n))
+    _fig, axes = plt.subplots(n, 1, figsize=(14, 5 * n))
     if n == 1:
         axes = [axes]
 
@@ -404,7 +405,7 @@ def plot_underwater(daily_returns: dict[str, pd.Series]):
     each portfolio stays below its previous high-water mark.
     """
     n = len(daily_returns)
-    fig, axes = plt.subplots(n, 1, figsize=(14, 4 * n), sharex=False)
+    _fig, axes = plt.subplots(n, 1, figsize=(14, 4 * n), sharex=False)
     if n == 1:
         axes = [axes]
 
@@ -426,7 +427,7 @@ def plot_underwater(daily_returns: dict[str, pd.Series]):
             textcoords="offset points",
             fontsize=9,
             color="darkred",
-            arrowprops=dict(arrowstyle="->", color="darkred", lw=0.8),
+            arrowprops={"arrowstyle": "->", "color": "darkred", "lw": 0.8},
         )
 
         ax.set_title(f"{name} — Underwater Chart (Drawdown from Peak)", fontsize=12, fontweight="bold")
@@ -444,7 +445,7 @@ def plot_underwater(daily_returns: dict[str, pd.Series]):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     START = "2025-01-01"
-    END = datetime.today().strftime("%Y-%m-%d")
+    END = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
 
     # --- US portfolios vs SPY ---
     us_portfolios = {

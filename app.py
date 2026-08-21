@@ -1,30 +1,55 @@
-import streamlit as st
-import pandas as pd
+from datetime import date, datetime, timedelta, timezone
+
 import matplotlib.pyplot as plt
 import numpy as np
-import scipy.stats
+import pandas as pd
 import plotly.graph_objects as go
+import scipy.stats
+import streamlit as st
 from plotly.subplots import make_subplots
-from datetime import date, timedelta  # noqa: F401
 
 from portfolio import (
-    get_close_prices,
-    build_portfolio_returns,
-    cumulative_returns,
     annualised_return,
     annualised_volatility,
+    build_portfolio_returns,
+    calmar_ratio,
+    cumulative_returns,
+    cvar,
+    drawdown_recovery_days,
+    get_close_prices,
+    hill_estimator,
+    max_drawdown,
+    portfolio_alpha,
+    portfolio_beta,
+    portfolio_correlation,
     sharpe_ratio,
     sortino_ratio,
-    calmar_ratio,
-    max_drawdown,
-    drawdown_recovery_days,
     var,
-    cvar,
-    portfolio_beta,
-    portfolio_alpha,
-    portfolio_correlation,
-    hill_estimator,
 )
+
+# ---------------------------------------------------------------------------
+# Price-download failure modes
+# ---------------------------------------------------------------------------
+# yfinance returns an empty frame for most bad inputs (unknown ticker, inverted
+# or unparseable dates), so the cases that actually raise are:
+#   OSError    — network/HTTP failure (requests' exceptions subclass OSError)
+#   KeyError   — the response has no "Close" column
+#   ValueError — nothing to concatenate (e.g. an empty ticker list)
+#   IndexError — ticker list indexed while empty
+PRICE_FETCH_ERRORS = (OSError, KeyError, ValueError, IndexError)
+
+
+# ---------------------------------------------------------------------------
+# Date helper
+# ---------------------------------------------------------------------------
+def today() -> date:
+    """Current date in the machine's local timezone.
+
+    Built from a tz-aware datetime rather than date.today() so the value is
+    unambiguous (and so ruff's DTZ011 stays quiet).
+    """
+    return datetime.now(timezone.utc).astimezone().date()
+
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -37,7 +62,7 @@ st.title("📈 Portfolio Analyser")
 # ---------------------------------------------------------------------------
 st.sidebar.header("Settings")
 start_date  = st.sidebar.date_input("Start date", value=date(2023, 1, 1))
-end_date    = st.sidebar.date_input("End date",   value=date.today())
+end_date    = st.sidebar.date_input("End date",   value=today())
 benchmark   = st.sidebar.text_input("Benchmark ticker", value="SPY")
 rfr         = st.sidebar.number_input("Risk-free rate (%)", value=4.0, step=0.25) / 100
 roll_window = st.sidebar.number_input("Rolling vol. window (days)", min_value=5, max_value=252, value=21, step=1)
@@ -88,16 +113,16 @@ def draw_heatmap_plotly(name, daily_ret):
         zmax=10,
         text=text,
         texttemplate="%{text}",
-        textfont=dict(size=11),
-        colorbar=dict(title="Return (%)"),
+        textfont={"size": 11},
+        colorbar={"title": "Return (%)"},
         hovertemplate="Year: %{y}<br>Period: %{x}<br>Return: %{z:.2f}%<extra></extra>",
     ))
     fig.update_layout(
-        title=dict(text=f"{name} — Monthly Returns (%)", font=dict(size=14)),
-        xaxis=dict(side="bottom"),
-        yaxis=dict(autorange="reversed"),
+        title={"text": f"{name} — Monthly Returns (%)", "font": {"size": 14}},
+        xaxis={"side": "bottom"},
+        yaxis={"autorange": "reversed"},
         height=max(250, 60 * len(pivot.index) + 100),
-        margin=dict(l=60, r=60, t=60, b=40),
+        margin={"l": 60, "r": 60, "t": 60, "b": 40},
     )
     st.plotly_chart(fig, width='stretch')
 
@@ -139,7 +164,7 @@ def _close_price_on(ticker: str, date_str: str) -> float | None:
     end = (pd.Timestamp(date_str) + timedelta(days=10)).strftime("%Y-%m-%d")
     try:
         px = get_close_prices([ticker], date_str, end)
-    except Exception:
+    except PRICE_FETCH_ERRORS:
         return None
     if isinstance(px.columns, pd.MultiIndex):
         px.columns = px.columns.get_level_values(0)
@@ -210,7 +235,7 @@ with tab_builder:
                         ).upper().strip()
                     with r1c2:
                         new_date = st.date_input(
-                            "Purchase date", key=f"date_{port_name}", value=date.today(),
+                            "Purchase date", key=f"date_{port_name}", value=today(),
                         )
 
                     r2c1, r2c2, r2c3 = st.columns([2, 2, 2])
@@ -250,7 +275,7 @@ with tab_builder:
                         ).upper().strip()
                     with s1c2:
                         sell_date = st.date_input(
-                            "Sale date", key=f"sell_date_{port_name}", value=date.today(),
+                            "Sale date", key=f"sell_date_{port_name}", value=today(),
                         )
 
                     s2c1, s2c2, s2c3 = st.columns([2, 2, 2])
@@ -298,7 +323,7 @@ with tab_builder:
                         ).upper().strip()
                     with sp2:
                         simp_date = st.date_input(
-                            "Start date", key=f"simp_date_{port_name}", value=date.today(),
+                            "Start date", key=f"simp_date_{port_name}", value=today(),
                         )
 
                     if st.button("Add Position", key=f"simp_add_{port_name}", width='stretch') \
@@ -343,7 +368,7 @@ with tab_builder:
                         )
                     with ss2:
                         simp_sell_date = st.date_input(
-                            "Sale date", key=f"simp_sell_date_{port_name}", value=date.today(),
+                            "Sale date", key=f"simp_sell_date_{port_name}", value=today(),
                         )
 
                     if st.button("Close Position", key=f"simp_sell_{port_name}", width='stretch') \
@@ -411,15 +436,15 @@ with tab_builder:
                         # Fetch latest close price for open tickers
                         open_tickers = list(totals_by_ticker.keys())
                         latest_prices: dict[str, float] = {}
-                        _price_start = (date.today() - timedelta(days=7)).strftime("%Y-%m-%d")
-                        _price_end   = date.today().strftime("%Y-%m-%d")
+                        _price_start = (today() - timedelta(days=7)).strftime("%Y-%m-%d")
+                        _price_end   = today().strftime("%Y-%m-%d")
                         try:
                             with st.spinner("Fetching latest prices…"):
                                 _px = get_close_prices(open_tickers, _price_start, _price_end)
                             for t in open_tickers:
                                 if t in _px.columns and not _px[t].dropna().empty:
                                     latest_prices[t] = float(_px[t].dropna().iloc[-1])
-                        except Exception:
+                        except PRICE_FETCH_ERRORS:
                             pass  # latest_prices stays empty; column shows N/A
 
                         left, right = st.columns([3, 2])
@@ -486,7 +511,7 @@ with tab_builder:
                     sorted_txns = sorted(purchases, key=lambda p: p["date"])
                     evo_tickers = sorted({p["ticker"] for p in sorted_txns})
                     first_date  = pd.Timestamp(sorted_txns[0]["date"])
-                    today_ts    = pd.Timestamp(date.today())
+                    today_ts    = pd.Timestamp(today())
 
                     evo_prices = None
                     try:
@@ -496,7 +521,7 @@ with tab_builder:
                                 first_date.strftime("%Y-%m-%d"),
                                 (today_ts + timedelta(days=1)).strftime("%Y-%m-%d"),
                             )
-                    except Exception as e:
+                    except PRICE_FETCH_ERRORS as e:
                         st.warning(f"Could not fetch price history: {e}")
 
                     if evo_prices is not None and not evo_prices.empty:
@@ -522,14 +547,14 @@ with tab_builder:
                         fig_evo.add_trace(go.Scatter(
                             x=market_value.index, y=market_value.round(2),
                             mode="lines", name="Market Value",
-                            line=dict(color="steelblue", width=2),
+                            line={"color": "steelblue", "width": 2},
                             fill="tozeroy", fillcolor="rgba(70,130,180,0.18)",
                             hovertemplate="%{x|%Y-%m-%d}<br>Value: $%{y:,.2f}<extra></extra>",
                         ))
                         fig_evo.add_trace(go.Scatter(
                             x=cost_basis.index, y=cost_basis.round(2),
                             mode="lines", name="Net Invested (cost basis)",
-                            line=dict(color="darkorange", width=1.5, dash="dash"),
+                            line={"color": "darkorange", "width": 1.5, "dash": "dash"},
                             hovertemplate="%{x|%Y-%m-%d}<br>Cost: $%{y:,.2f}<extra></extra>",
                         ))
 
@@ -550,13 +575,12 @@ with tab_builder:
                         fig_evo.add_trace(go.Scatter(
                             x=marker_x, y=marker_y,
                             mode="markers", name="Transactions",
-                            marker=dict(size=10, color=marker_colors,
-                                        line=dict(color="white", width=1.5)),
+                            marker={"size": 10, "color": marker_colors, "line": {"color": "white", "width": 1.5}},
                             customdata=marker_labels,
                             hovertemplate="<b>%{customdata}</b><br>%{x|%Y-%m-%d}<extra></extra>",
                         ))
 
-                        fig_evo.add_hline(y=0, line=dict(color="gray", dash="dash", width=0.8))
+                        fig_evo.add_hline(y=0, line={"color": "gray", "dash": "dash", "width": 0.8})
                         fig_evo.update_layout(
                             xaxis_title="Date",
                             yaxis_title="Portfolio Value ($)",
@@ -564,9 +588,8 @@ with tab_builder:
                             yaxis_tickformat=",.0f",
                             hovermode="x unified",
                             height=400,
-                            margin=dict(t=20),
-                            legend=dict(orientation="h", yanchor="bottom",
-                                        y=1.02, xanchor="right", x=1),
+                            margin={"t": 20},
+                            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
                         )
                         st.plotly_chart(fig_evo, width='stretch')
 
@@ -590,19 +613,18 @@ with tab_builder:
                             fig_pct.add_trace(go.Scatter(
                                 x=pct_return.index, y=pct_return.round(2),
                                 mode="lines", name="Return (%)",
-                                line=dict(color=line_clr, width=2),
+                                line={"color": line_clr, "width": 2},
                                 fill="tozeroy", fillcolor=fill_clr,
                                 hovertemplate="%{x|%Y-%m-%d}<br>Return: %{y:+.2f}%<extra></extra>",
                             ))
-                            fig_pct.add_hline(y=0, line=dict(color="gray",
-                                                              dash="dash", width=0.8))
+                            fig_pct.add_hline(y=0, line={"color": "gray", "dash": "dash", "width": 0.8})
                             fig_pct.update_layout(
                                 xaxis_title="Date",
                                 yaxis_title="Return (%)",
                                 yaxis_ticksuffix="%",
                                 hovermode="x unified",
                                 height=300,
-                                margin=dict(t=20),
+                                margin={"t": 20},
                             )
                             st.plotly_chart(fig_pct, width='stretch')
 
@@ -751,7 +773,7 @@ with tab_analysis:
         )
         try:
             prices = get_close_prices(all_tickers, start_str, end_str)
-        except Exception as e:
+        except PRICE_FETCH_ERRORS as e:
             st.error(f"Failed to download prices: {e}")
             st.stop()
 
@@ -827,9 +849,9 @@ with tab_analysis:
     fig_cum.add_trace(go.Scatter(
         x=benchmark_cum.index, y=(benchmark_cum * 100).round(2),
         mode="lines", name=benchmark,
-        line=dict(color="gray", dash="dash"),
+        line={"color": "gray", "dash": "dash"},
     ))
-    fig_cum.add_hline(y=0, line=dict(color="red", dash="dash", width=1))
+    fig_cum.add_hline(y=0, line={"color": "red", "dash": "dash", "width": 1})
     fig_cum.update_layout(
         title=f"Cumulative Returns ({start_str} → {end_str})",
         xaxis_title="Date",
@@ -849,7 +871,7 @@ with tab_analysis:
     fig_vol.add_trace(go.Scatter(
         x=bm_roll_vol.index, y=bm_roll_vol.round(2),
         mode="lines", name=benchmark,
-        line=dict(color="gray", dash="dash"),
+        line={"color": "gray", "dash": "dash"},
     ))
     fig_vol.update_layout(
         title=f"Rolling Annualised Volatility ({roll_window}-day window)",
@@ -876,15 +898,15 @@ with tab_analysis:
         fig_uw.add_trace(go.Scatter(
             x=drawdown.index, y=drawdown.round(2),
             fill="tozeroy", fillcolor="rgba(220,20,60,0.35)",
-            line=dict(color="darkred", width=0.8),
+            line={"color": "darkred", "width": 0.8},
             name=name, showlegend=False,
         ), row=i, col=1)
-        fig_uw.add_hline(y=0, line=dict(color="black", dash="dash", width=0.8), row=i, col=1)
+        fig_uw.add_hline(y=0, line={"color": "black", "dash": "dash", "width": 0.8}, row=i, col=1)
         fig_uw.add_annotation(
             x=max_dd_date, y=max_dd,
             text=f"Max DD: {max_dd:.1f}%",
             showarrow=True, arrowhead=2, arrowcolor="darkred",
-            font=dict(color="darkred", size=9),
+            font={"color": "darkred", "size": 9},
             row=i, col=1,
         )
         fig_uw.update_yaxes(title_text="Drawdown (%)", ticksuffix="%", row=i, col=1)
@@ -982,16 +1004,16 @@ with tab_analysis:
             colorscale="RdYlGn",
             text=text,
             texttemplate="%{text}",
-            textfont=dict(size=11),
-            colorbar=dict(title="Correlation"),
+            textfont={"size": 11},
+            colorbar={"title": "Correlation"},
             hovertemplate="%{y} × %{x}: %{z:.2f}<extra></extra>",
         ))
         fig_corr.update_layout(
-            title=dict(text=f"{port_name} — Stock Correlation", font=dict(size=14)),
-            xaxis=dict(side="bottom"),
-            yaxis=dict(autorange="reversed"),
+            title={"text": f"{port_name} — Stock Correlation", "font": {"size": 14}},
+            xaxis={"side": "bottom"},
+            yaxis={"autorange": "reversed"},
             height=max(300, 55 * len(tickers) + 100),
-            margin=dict(l=60, r=60, t=60, b=60),
+            margin={"l": 60, "r": 60, "t": 60, "b": 60},
         )
         st.plotly_chart(fig_corr, width='stretch')
 
@@ -1022,33 +1044,33 @@ with tab_analysis:
             ys.extend((path * 100).tolist() + [None])
         fig_mc.add_trace(go.Scatter(
             x=xs, y=ys, mode="lines",
-            line=dict(color="steelblue", width=0.5),
+            line={"color": "steelblue", "width": 0.5},
             opacity=0.08, name="Simulations", showlegend=(i == 1),
         ), row=i, col=1)
 
         # Confidence bands (5-95, 25-75)
-        fig_mc.add_trace(go.Scatter(x=days, y=p95, mode="lines", line=dict(width=0), showlegend=False), row=i, col=1)
+        fig_mc.add_trace(go.Scatter(x=days, y=p95, mode="lines", line={"width": 0}, showlegend=False), row=i, col=1)
         fig_mc.add_trace(go.Scatter(x=days, y=p5, fill="tonexty",
-            fillcolor="rgba(70,130,180,0.15)", line=dict(width=0),
+            fillcolor="rgba(70,130,180,0.15)", line={"width": 0},
             name="5–95th pct", showlegend=(i == 1)), row=i, col=1)
-        fig_mc.add_trace(go.Scatter(x=days, y=p75, mode="lines", line=dict(width=0), showlegend=False), row=i, col=1)
+        fig_mc.add_trace(go.Scatter(x=days, y=p75, mode="lines", line={"width": 0}, showlegend=False), row=i, col=1)
         fig_mc.add_trace(go.Scatter(x=days, y=p25, fill="tonexty",
-            fillcolor="rgba(70,130,180,0.30)", line=dict(width=0),
+            fillcolor="rgba(70,130,180,0.30)", line={"width": 0},
             name="25–75th pct", showlegend=(i == 1)), row=i, col=1)
 
         # Median line
         fig_mc.add_trace(go.Scatter(x=days, y=p50, mode="lines",
-            line=dict(color="navy", width=2), name="Median", showlegend=(i == 1)), row=i, col=1)
+            line={"color": "navy", "width": 2}, name="Median", showlegend=(i == 1)), row=i, col=1)
 
         # Zero reference line
-        fig_mc.add_hline(y=0, line=dict(color="black", dash="dash", width=0.8), row=i, col=1)
+        fig_mc.add_hline(y=0, line={"color": "black", "dash": "dash", "width": 0.8}, row=i, col=1)
 
         # Annotations for final percentile values
         for pct_val, lbl in [(p5[-1], "5th"), (p50[-1], "50th"), (p95[-1], "95th")]:
             fig_mc.add_annotation(
                 x=mc_days, y=pct_val,
                 text=f"{pct_val:.1f}%", showarrow=False,
-                xanchor="left", font=dict(color="navy", size=9),
+                xanchor="left", font={"color": "navy", "size": 9},
                 row=i, col=1,
             )
 
@@ -1087,36 +1109,36 @@ with tab_analysis:
             ys.extend((path * 100).tolist() + [None])
         fig_mct.add_trace(go.Scatter(
             x=xs, y=ys, mode="lines",
-            line=dict(color="darkorange", width=0.5),
+            line={"color": "darkorange", "width": 0.5},
             opacity=0.08, name="Simulations", showlegend=(i == 1),
         ), row=i, col=1)
 
-        fig_mct.add_trace(go.Scatter(x=days, y=p95, mode="lines", line=dict(width=0), showlegend=False), row=i, col=1)
+        fig_mct.add_trace(go.Scatter(x=days, y=p95, mode="lines", line={"width": 0}, showlegend=False), row=i, col=1)
         fig_mct.add_trace(go.Scatter(x=days, y=p5, fill="tonexty",
-            fillcolor="rgba(255,140,0,0.15)", line=dict(width=0),
+            fillcolor="rgba(255,140,0,0.15)", line={"width": 0},
             name="5–95th pct", showlegend=(i == 1)), row=i, col=1)
-        fig_mct.add_trace(go.Scatter(x=days, y=p75, mode="lines", line=dict(width=0), showlegend=False), row=i, col=1)
+        fig_mct.add_trace(go.Scatter(x=days, y=p75, mode="lines", line={"width": 0}, showlegend=False), row=i, col=1)
         fig_mct.add_trace(go.Scatter(x=days, y=p25, fill="tonexty",
-            fillcolor="rgba(255,140,0,0.30)", line=dict(width=0),
+            fillcolor="rgba(255,140,0,0.30)", line={"width": 0},
             name="25–75th pct", showlegend=(i == 1)), row=i, col=1)
 
         fig_mct.add_trace(go.Scatter(x=days, y=p50, mode="lines",
-            line=dict(color="saddlebrown", width=2), name="Median", showlegend=(i == 1)), row=i, col=1)
+            line={"color": "saddlebrown", "width": 2}, name="Median", showlegend=(i == 1)), row=i, col=1)
 
-        fig_mct.add_hline(y=0, line=dict(color="black", dash="dash", width=0.8), row=i, col=1)
+        fig_mct.add_hline(y=0, line={"color": "black", "dash": "dash", "width": 0.8}, row=i, col=1)
 
         for pct_val, lbl in [(p5[-1], "5th"), (p50[-1], "50th"), (p95[-1], "95th")]:
             fig_mct.add_annotation(
                 x=mc_days, y=pct_val,
                 text=f"{pct_val:.1f}%", showarrow=False,
-                xanchor="left", font=dict(color="saddlebrown", size=9),
+                xanchor="left", font={"color": "saddlebrown", "size": 9},
                 row=i, col=1,
             )
 
         fig_mct.add_annotation(
             x=0.01, y=0.98, xref="paper", yref="paper",
             text=f"Fitted ν = {df_t:.1f}", showarrow=False,
-            font=dict(size=10, color="saddlebrown"),
+            font={"size": 10, "color": "saddlebrown"},
             xanchor="left", yanchor="top",
             row=i, col=1,
         )
@@ -1156,36 +1178,36 @@ with tab_analysis:
             ys.extend((path * 100).tolist() + [None])
         fig_mcc.add_trace(go.Scatter(
             x=xs, y=ys, mode="lines",
-            line=dict(color="purple", width=0.5),
+            line={"color": "purple", "width": 0.5},
             opacity=0.08, name="Simulations", showlegend=(i == 1),
         ), row=i, col=1)
 
-        fig_mcc.add_trace(go.Scatter(x=days, y=p95, mode="lines", line=dict(width=0), showlegend=False), row=i, col=1)
+        fig_mcc.add_trace(go.Scatter(x=days, y=p95, mode="lines", line={"width": 0}, showlegend=False), row=i, col=1)
         fig_mcc.add_trace(go.Scatter(x=days, y=p5, fill="tonexty",
-            fillcolor="rgba(128,0,128,0.15)", line=dict(width=0),
+            fillcolor="rgba(128,0,128,0.15)", line={"width": 0},
             name="5–95th pct", showlegend=(i == 1)), row=i, col=1)
-        fig_mcc.add_trace(go.Scatter(x=days, y=p75, mode="lines", line=dict(width=0), showlegend=False), row=i, col=1)
+        fig_mcc.add_trace(go.Scatter(x=days, y=p75, mode="lines", line={"width": 0}, showlegend=False), row=i, col=1)
         fig_mcc.add_trace(go.Scatter(x=days, y=p25, fill="tonexty",
-            fillcolor="rgba(128,0,128,0.30)", line=dict(width=0),
+            fillcolor="rgba(128,0,128,0.30)", line={"width": 0},
             name="25–75th pct", showlegend=(i == 1)), row=i, col=1)
 
         fig_mcc.add_trace(go.Scatter(x=days, y=p50, mode="lines",
-            line=dict(color="indigo", width=2), name="Median", showlegend=(i == 1)), row=i, col=1)
+            line={"color": "indigo", "width": 2}, name="Median", showlegend=(i == 1)), row=i, col=1)
 
-        fig_mcc.add_hline(y=0, line=dict(color="black", dash="dash", width=0.8), row=i, col=1)
+        fig_mcc.add_hline(y=0, line={"color": "black", "dash": "dash", "width": 0.8}, row=i, col=1)
 
         for pct_val in [p5[-1], p50[-1], p95[-1]]:
             fig_mcc.add_annotation(
                 x=mc_days, y=pct_val,
                 text=f"{pct_val:.1f}%", showarrow=False,
-                xanchor="left", font=dict(color="indigo", size=9),
+                xanchor="left", font={"color": "indigo", "size": 9},
                 row=i, col=1,
             )
 
         fig_mcc.add_annotation(
             x=0.01, y=0.98, xref="paper", yref="paper",
             text=f"Fitted loc={loc_c:.4f}, scale={scale_c:.4f}", showarrow=False,
-            font=dict(size=10, color="indigo"),
+            font={"size": 10, "color": "indigo"},
             xanchor="left", yanchor="top",
             row=i, col=1,
         )
@@ -1247,10 +1269,10 @@ with tab_analysis:
         }
 
     # Reference lines
-    fig_hill.add_hline(y=0.25, line=dict(color="green",  dash="dot", width=1),
+    fig_hill.add_hline(y=0.25, line={"color": "green", "dash": "dot", "width": 1},
                        annotation_text="ξ = 0.25 (thin/moderate boundary)",
                        annotation_position="bottom right")
-    fig_hill.add_hline(y=0.50, line=dict(color="orange", dash="dot", width=1),
+    fig_hill.add_hline(y=0.50, line={"color": "orange", "dash": "dot", "width": 1},
                        annotation_text="ξ = 0.50 (moderate/heavy boundary)",
                        annotation_position="bottom right")
 
