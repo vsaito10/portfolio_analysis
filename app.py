@@ -13,6 +13,9 @@ from portfolio import (
     annualised_volatility,
     build_portfolio_returns,
     calmar_ratio,
+    conditional_betas,
+    coskewness,
+    coskewness_jackknife,
     cumulative_returns,
     cvar,
     drawdown_recovery_days,
@@ -23,7 +26,10 @@ from portfolio import (
     portfolio_beta,
     portfolio_correlation,
     sharpe_ratio,
+    skewness_ci,
     sortino_ratio,
+    stable_tail_index,
+    tail_ratio,
     var,
 )
 
@@ -37,6 +43,18 @@ from portfolio import (
 #   ValueError — nothing to concatenate (e.g. an empty ticker list)
 #   IndexError — ticker list indexed while empty
 PRICE_FETCH_ERRORS = (OSError, KeyError, ValueError, IndexError)
+
+
+# ---------------------------------------------------------------------------
+# Sample-size floors for the per-stock tail table
+# ---------------------------------------------------------------------------
+# Tail statistics need history. A 50-session sample produced conditional betas of
+# 4.4 and 8.9 in testing — noise, not risk — so anything under a year of trading
+# days is shown apart from the comparable names instead of alongside them.
+MIN_TAIL_OBSERVATIONS = 252
+# Below this, percentile-based measures stop meaning anything at all: VaR 99 %
+# would be read off a single observation.
+MIN_COMPUTABLE_OBSERVATIONS = 30
 
 
 # ---------------------------------------------------------------------------
@@ -1247,10 +1265,7 @@ with tab_analysis:
             hovertemplate="k=%{x}<br>ξ=%{y:.4f}<extra>" + name + "</extra>",
         ))
 
-        # Stable estimate: median over the middle 40 % of k range (ignores noisy tails)
-        lo = int(len(df_hill) * 0.30)
-        hi = int(len(df_hill) * 0.70)
-        xi_stable = df_hill["xi"].iloc[lo:hi].median()
+        xi_stable = stable_tail_index(daily_ret, k_max=k_max_hill)
 
         if xi_stable < 0.25:
             risk_label = "Thin tail — low extreme-event risk"
@@ -1299,3 +1314,113 @@ with tab_analysis:
         width='stretch',
     )
 
+    # -----------------------------------------------------------------------
+    # Per-stock tail risk
+    # -----------------------------------------------------------------------
+    st.subheader("⚖️ Per-Stock Tail Risk")
+    st.caption(
+        "Tabela ordenada por coassimetria, da pior para a melhor. O que cada coluna mede:\n\n"
+        "- **n** — pregões usados no cálculo. Estatística de cauda precisa de amostra: "
+        f"ações com menos de {MIN_TAIL_OBSERVATIONS} pregões vão para uma tabela separada, "
+        "porque os números delas não são comparáveis aos das demais.\n"
+        "- **Coskew** — coassimetria: como a ação se comporta nos dias de maior movimento "
+        "do mercado. Negativa significa que os piores retornos dela caem justamente na "
+        "turbulência — a assimetria que a diversificação não elimina.\n"
+        "- **Coskew (jack)** — a mesma coassimetria recalculada sem o único pregão de "
+        "maior influência. Se os dois valores forem muito diferentes, ou trocarem de "
+        "sinal, o indicador está apoiado em um dia só e não descreve o comportamento "
+        "típico da ação. Leia sempre os dois juntos.\n"
+        "- **β⁻** — beta medido só nos 20% piores dias do benchmark: quanto a ação cai "
+        "quando o mercado cai.\n"
+        "- **β⁺** — beta nos 20% melhores dias: quanto ela sobe quando o mercado sobe.\n"
+        "- **Δβ** — β⁻ menos β⁺. Positivo quer dizer que a ação cai mais do que sobe, a "
+        "pior assimetria possível dentro de uma carteira.\n"
+        "- **VaR 95% (%)** — perda diária superada em apenas 5% dos pregões, cerca de um "
+        "dia a cada vinte.\n"
+        "- **CVaR 95% (%)** — perda média nesses 5% piores dias. Sempre maior que o VaR.\n"
+        "- **VaR 99% (%)** — o mesmo a 1%, dois ou três dias por ano. É aqui que a cauda "
+        "de fato começa.\n"
+        "- **CVaR 99% (%)** — perda média no 1% pior: o número de dia de pânico.\n"
+        "- **CVaR⁻/⁺** — razão entre a perda média extrema e o ganho médio extremo. Acima "
+        "de 1, as quedas extremas são maiores que as altas extremas.\n"
+        "- **Skew (95% CI)** — assimetria simples com intervalo bootstrap, só como "
+        "referência: ela se apoia em um punhado de dias, e \"n.s.\" marca os casos em que "
+        "o intervalo contém zero, ou seja, indistinguíveis de uma distribuição simétrica.\n"
+        "- **ξ** — índice de cauda de Hill. Quanto maior, mais gorda a cauda: abaixo de "
+        "0,25 é leve, entre 0,25 e 0,50 moderada, e de 0,50 para cima é pesada (α = 1/ξ ≤ "
+        "2, variância possivelmente infinita).\n"
+        "- **Período** — primeiro e último pregão com preço disponível. Ações com janelas "
+        "diferentes viveram mercados diferentes, então comparar as linhas entre si só faz "
+        "sentido quando os períodos coincidem."
+    )
+
+    def _grey(_val):
+        return "color: gray"
+
+    def _tail_table(rows: dict) -> pd.DataFrame:
+        # Worst coskewness first — the assets that hurt the portfolio in a crisis.
+        return pd.DataFrame.from_dict(rows, orient="index").sort_values("Coskew")
+
+    for port_name, purchases in portfolios.items():
+        rows: dict[str, dict] = {}
+        short_rows: dict[str, dict] = {}
+        skipped: list[str] = []
+
+        for ticker in sorted({p["ticker"] for p in purchases}):
+            if ticker not in prices.columns:
+                skipped.append(ticker)
+                continue
+            stock_ret = prices[ticker].pct_change().dropna()
+            if len(stock_ret) < MIN_COMPUTABLE_OBSERVATIONS:
+                skipped.append(ticker)
+                continue
+
+            beta_dn, beta_up = conditional_betas(stock_ret, benchmark_returns)
+            skew, skew_lo, skew_hi = skewness_ci(stock_ret)
+            skew_text = f"{skew:+.2f} [{skew_lo:+.2f}, {skew_hi:+.2f}]"
+            if skew_lo <= 0 <= skew_hi:
+                skew_text += " n.s."
+
+            span = prices[ticker].dropna().index
+            record = {
+                "n":              len(stock_ret),
+                "Coskew":         round(coskewness(stock_ret, benchmark_returns), 3),
+                "Coskew (jack)":  round(coskewness_jackknife(stock_ret, benchmark_returns), 3),
+                "β⁻":             round(beta_dn, 3),
+                "β⁺":             round(beta_up, 3),
+                "Δβ":             round(beta_dn - beta_up, 3),
+                "VaR 95% (%)":    round(var(stock_ret, 0.95) * 100, 2),
+                "CVaR 95% (%)":   round(cvar(stock_ret, 0.95) * 100, 2),
+                "VaR 99% (%)":    round(var(stock_ret, 0.99) * 100, 2),
+                "CVaR 99% (%)":   round(cvar(stock_ret, 0.99) * 100, 2),
+                "CVaR⁻/⁺":        round(tail_ratio(stock_ret), 3),
+                "Skew (95% CI)":  skew_text,
+                "ξ":              round(stable_tail_index(stock_ret), 3),
+                "Período":        f"{span.min():%Y-%m} → {span.max():%Y-%m}",
+            }
+
+            target = rows if len(stock_ret) >= MIN_TAIL_OBSERVATIONS else short_rows
+            target[ticker] = record
+
+        if not rows and not short_rows:
+            st.caption(f"{port_name}: sem histórico suficiente para métricas de cauda.")
+            continue
+
+        st.markdown(f"**{port_name}**")
+
+        if rows:
+            st.dataframe(_tail_table(rows), width='stretch')
+
+        if short_rows:
+            st.warning(
+                f"Histórico curto (menos de {MIN_TAIL_OBSERVATIONS} pregões): "
+                f"**{', '.join(sorted(short_rows))}**. Os números abaixo são "
+                "instáveis e não se comparam aos da tabela acima."
+            )
+            st.dataframe(_tail_table(short_rows).style.map(_grey), width='stretch')
+
+        if skipped:
+            st.caption(
+                f"Sem dados suficientes para calcular ({MIN_COMPUTABLE_OBSERVATIONS} "
+                f"pregões no mínimo): {', '.join(sorted(skipped))}."
+            )

@@ -147,6 +147,47 @@ def cvar(returns: pd.Series, confidence: float = 0.95) -> float:
     return -r[r <= threshold].mean()
 
 
+def tail_ratio(returns: pd.Series, confidence: float = 0.95) -> float:
+    """Tail asymmetry: mean loss in the left tail / mean gain in the right tail.
+
+    A robust stand-in for skewness. Values above 1 mean the extreme losses are
+    larger than the extreme gains, i.e. the kind of negative asymmetry that
+    matters for risk, measured without a third moment (which need not exist for
+    fat-tailed series).
+    """
+    r = returns.dropna()
+    upper = r[r >= np.percentile(r, confidence * 100)].mean()
+    return cvar(r, confidence) / upper if upper != 0 else float("nan")
+
+
+def skewness_ci(
+    returns: pd.Series,
+    n_boot: int = 1000,
+    seed: int = 42,
+) -> tuple[float, float, float]:
+    """Sample skewness with a bootstrap 95 % confidence interval.
+
+    Returns (skew, lo, hi). Daily-return skewness is dominated by a handful of
+    observations, so the interval usually straddles zero -- report it alongside
+    the point estimate rather than reading the estimate on its own.
+    """
+    r = returns.dropna()
+    n = len(r)
+    if n < 3:
+        return float("nan"), float("nan"), float("nan")
+
+    values = r.to_numpy()
+    rng = np.random.default_rng(seed)
+    # Resample every replicate at once; a Python loop costs ~1 s per ticker.
+    samples = values[rng.integers(0, n, (n_boot, n))]
+    centred = samples - samples.mean(axis=1, keepdims=True)
+    sigma = centred.std(axis=1, ddof=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        boot = (centred ** 3).mean(axis=1) / sigma ** 3
+    lo, hi = np.percentile(boot[np.isfinite(boot)], [2.5, 97.5])
+    return float(r.skew()), float(lo), float(hi)
+
+
 def portfolio_correlation(returns: pd.Series, benchmark_returns: pd.Series) -> float:
     """Compute Pearson correlation between portfolio and benchmark daily returns."""
     aligned = pd.concat([returns, benchmark_returns], axis=1).dropna()
@@ -170,6 +211,70 @@ def portfolio_alpha(
     rp = annualised_return(returns)
     rm = annualised_return(benchmark_returns)
     return rp - (risk_free_rate + beta * (rm - risk_free_rate))
+
+
+def coskewness(returns: pd.Series, benchmark_returns: pd.Series) -> float:
+    """Coskewness (systematic skewness) of an asset against a benchmark.
+
+        coskew = E[(Ri - mu_i)(Rm - mu_m)^2] / (sigma_i * sigma_m^2)
+
+    Negative values mean the asset delivers its worst returns precisely when the
+    market moves most violently -- the asymmetry that does not diversify away.
+    Unlike plain skewness this is only second order in the asset's own returns,
+    so it stays finite for the fat-tailed series equities actually have.
+    """
+    aligned = pd.concat([returns, benchmark_returns], axis=1).dropna()
+    r = aligned.iloc[:, 0]
+    m = aligned.iloc[:, 1]
+    denom = r.std() * m.var()
+    if denom == 0:
+        return float("nan")
+    return float(((r - r.mean()) * (m - m.mean()) ** 2).mean() / denom)
+
+
+def conditional_betas(
+    returns: pd.Series,
+    benchmark_returns: pd.Series,
+    quantile: float = 0.20,
+) -> tuple[float, float]:
+    """Beta measured separately on the benchmark's worst and best days.
+
+    Returns (beta_down, beta_up), using the days where the benchmark sits in its
+    lower and upper `quantile` respectively. beta_down > beta_up is coskewness
+    made legible: the asset falls with the market but does not rise with it.
+    """
+    aligned = pd.concat([returns, benchmark_returns], axis=1).dropna()
+    r = aligned.iloc[:, 0]
+    m = aligned.iloc[:, 1]
+
+    def _beta(mask: pd.Series) -> float:
+        sub = aligned[mask]
+        if len(sub) < 2:
+            return float("nan")
+        var_m = sub.iloc[:, 1].var()
+        return float(sub.cov().iloc[0, 1] / var_m) if var_m != 0 else float("nan")
+
+    return _beta(m <= m.quantile(quantile)), _beta(m >= m.quantile(1 - quantile))
+
+
+def coskewness_jackknife(returns: pd.Series, benchmark_returns: pd.Series) -> float:
+    """Coskewness recomputed without the single most influential observation.
+
+    Coskewness is a sum of per-day terms, and one violent session can dominate
+    it: a market-wide melt-up counts as "violent" just as a crash does, because
+    the benchmark term is squared. Compare this against `coskewness()` -- a wide
+    gap, or a change of sign, means the estimate rests on one day rather than on
+    the asset's usual behaviour.
+    """
+    aligned = pd.concat([returns, benchmark_returns], axis=1).dropna()
+    if len(aligned) < 3:
+        return float("nan")
+
+    r = aligned.iloc[:, 0]
+    m = aligned.iloc[:, 1]
+    contribution = ((r - r.mean()) * (m - m.mean()) ** 2).abs()
+    kept = aligned.drop(index=contribution.idxmax())
+    return coskewness(kept.iloc[:, 0], kept.iloc[:, 1])
 
 
 def hill_estimator(returns: pd.Series, k_max: int | None = None) -> pd.DataFrame:
@@ -211,6 +316,22 @@ def hill_estimator(returns: pd.Series, k_max: int | None = None) -> pd.DataFrame
         xis.append(xi)
 
     return pd.DataFrame({"k": ks, "xi": xis})
+
+
+def stable_tail_index(returns: pd.Series, k_max: int | None = None) -> float:
+    """Single tail-index estimate read off the plateau of the Hill plot.
+
+    Hill's xi(k) is noisy for small k and biased for large k (the body of the
+    distribution creeps in), so take the median over the middle 40 % of the k
+    range rather than trusting any single k.
+    """
+    df = hill_estimator(returns, k_max=k_max)
+    if df.empty:
+        return float("nan")
+    lo = int(len(df) * 0.30)
+    hi = int(len(df) * 0.70)
+    window = df["xi"].iloc[lo:hi]
+    return float(window.median()) if not window.empty else float("nan")
 
 
 def compare_portfolios(
